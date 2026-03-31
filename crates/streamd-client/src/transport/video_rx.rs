@@ -10,8 +10,7 @@ use std::sync::{
 };
 use std::thread::JoinHandle;
 use std::time::Duration;
-use streamd_proto::packets::MAX_FRAME_AGE_US;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, warn};
 
 use streamd_proto::packets::parse_video_header as parse_header;
 
@@ -191,18 +190,6 @@ fn receive_loop(
                 hdr.is_keyframe()
             );
             first_fragment_logged = true;
-        }
-
-        let now_us = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_micros() as u64;
-
-        // Drop stale frames
-        if now_us.saturating_sub(hdr.timestamp_us) > MAX_FRAME_AGE_US {
-            trace!("dropping stale frame {}", hdr.frame_seq);
-            frames.remove(&hdr.frame_seq);
-            continue;
         }
 
         let entry = frames.entry(hdr.frame_seq).or_insert_with(|| FrameState {

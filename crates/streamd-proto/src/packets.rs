@@ -229,5 +229,3 @@ pub fn parse_video_header(buf: &[u8]) -> Option<(VideoPacketHeader, &[u8])> {
 pub const MTU_WAN: usize = 1400;
 /// Maximum UDP payload when jumbo frames are available (LAN).
 pub const MTU_LAN: usize = 8900;
-/// Receiver-side frame discard threshold: frames older than this (µs) are dropped.
-pub const MAX_FRAME_AGE_US: u64 = 25_000;
