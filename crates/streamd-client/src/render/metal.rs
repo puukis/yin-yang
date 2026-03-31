@@ -20,13 +20,13 @@ use core_video::{
     },
 };
 #[cfg(target_os = "macos")]
-use foreign_types::ForeignType;
-#[cfg(target_os = "macos")]
 use metal::{
     CommandQueue, CompileOptions, Device, DeviceRef, MTLClearColor, MTLLoadAction, MTLPixelFormat,
     MTLPrimitiveType, MTLStoreAction, MetalLayer, MetalLayerRef, RenderPassDescriptor,
     RenderPipelineDescriptor, RenderPipelineState,
 };
+#[cfg(target_os = "macos")]
+use objc::{msg_send, sel, sel_impl};
 #[cfg(target_os = "macos")]
 use std::sync::atomic::Ordering;
 #[cfg(target_os = "macos")]
@@ -249,7 +249,7 @@ impl RendererState {
         let texture_cache = CVMetalTextureCache::new(None, device.clone(), None)
             .map_err(|status| anyhow!("create CVMetalTextureCache failed: {status}"))?;
 
-        let mut layer = MetalLayer::new();
+        let layer = MetalLayer::new();
         layer.set_device(&device);
         layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
         layer.set_presents_with_transaction(false);
@@ -317,7 +317,6 @@ unsafe fn pump_app_events(app: cocoa::base::id) {
 #[cfg(target_os = "macos")]
 unsafe fn sync_layer_frame(content_view: cocoa::base::id, layer: &MetalLayerRef) {
     use cocoa::foundation::NSRect;
-    use objc::msg_send;
 
     let bounds: NSRect = msg_send![content_view, bounds];
     let _: () = msg_send![layer, setFrame: bounds];
@@ -332,10 +331,9 @@ unsafe fn resize_window_and_layer(
     height_px: u32,
 ) {
     use cocoa::{
-        appkit::NSWindow,
-        foundation::{CGFloat, NSSize},
+        appkit::{CGFloat, NSWindow},
+        foundation::NSSize,
     };
-    use objc::msg_send;
 
     let scale: CGFloat = msg_send![window, backingScaleFactor];
     let scale = if scale > 0.0 { scale as f64 } else { 1.0 };

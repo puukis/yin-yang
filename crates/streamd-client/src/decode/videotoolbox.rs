@@ -1,6 +1,8 @@
 //! VideoToolbox hardware decoder for H.264.
 
-use anyhow::{bail, Result};
+#[cfg(not(target_os = "macos"))]
+use anyhow::bail;
+use anyhow::Result;
 use crossbeam_channel::Receiver;
 use std::{
     sync::{
@@ -13,7 +15,7 @@ use std::{
 use crate::transport::video_rx::DecodedFrame;
 
 #[cfg(target_os = "macos")]
-use core_foundation::base::TCFType;
+use core_foundation::base::{kCFAllocatorDefault, TCFType};
 #[cfg(target_os = "macos")]
 use core_video::pixel_buffer::{
     kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
@@ -362,7 +364,7 @@ fn retain_pixel_buffer(
 #[cfg(target_os = "macos")]
 mod vt {
     use core_foundation::{
-        base::{kCFAllocatorDefault, CFRelease, TCFType},
+        base::{CFRelease, TCFType},
         boolean::CFBoolean,
         dictionary::CFDictionary,
         number::CFNumber,
