@@ -235,22 +235,9 @@ fn run_pipeline_thread(
     #[cfg(target_os = "linux")]
     {
         let (frame_tx, frame_rx) = bounded::<CaptureFrame>(2);
-        let mut capture =
-            match WaylandCapture::new(CaptureMode::DmaBuf, display_id.as_deref(), frame_tx.clone())
-            {
-                Ok(capture) => {
-                    info!("pipeline thread: using Wayland DMA-BUF capture");
-                    capture
-                }
-                Err(err) => {
-                    warn!("DMA-BUF capture unavailable, falling back to SHM: {err:#}");
-                    WaylandCapture::new(CaptureMode::Shm, display_id.as_deref(), frame_tx)
-                        .context("initialise Wayland SHM capture fallback")?
-                }
-            };
-
-        let first_frame =
-            receive_wayland_frame(&mut capture, &frame_rx).context("capture first frame")?;
+        let (mut capture_mode, mut capture, first_frame) =
+            initialise_wayland_capture(display_id.as_deref(), &frame_tx, &frame_rx)
+                .context("initialise Wayland capture")?;
         let (mut capture_width, mut capture_height) = first_frame_dimensions(&first_frame)?;
         if capture_width != width || capture_height != height {
             warn!(
@@ -263,14 +250,36 @@ fn run_pipeline_thread(
                 .context("initialise NVENC encoder")?;
         let mut registered_dmabufs = HashSet::new();
         let mut pending_frame = Some(first_frame);
+        let mut force_idr_after_capture_reset = false;
 
         while !stop_flag.load(Ordering::Relaxed) {
             let frame_started_at = Instant::now();
             let frame = match pending_frame.take() {
                 Some(frame) => frame,
-                None => receive_wayland_frame(&mut capture, &frame_rx)?,
+                None => match receive_wayland_frame(&mut capture, &frame_rx) {
+                    Ok(frame) => frame,
+                    Err(err) if capture_mode == CaptureMode::DmaBuf => {
+                        warn!("Wayland DMA-BUF capture failed at runtime, falling back to SHM: {err:#}");
+                        let mut shm_capture = WaylandCapture::new(
+                            CaptureMode::Shm,
+                            display_id.as_deref(),
+                            frame_tx.clone(),
+                        )
+                        .context("reinitialise Wayland SHM capture fallback")?;
+                        let frame = receive_wayland_frame(&mut shm_capture, &frame_rx)
+                            .context("capture first SHM frame after DMA-BUF fallback")?;
+                        capture = shm_capture;
+                        capture_mode = CaptureMode::Shm;
+                        registered_dmabufs.clear();
+                        force_idr_after_capture_reset = true;
+                        frame
+                    }
+                    Err(err) => return Err(err).context("receive Wayland frame"),
+                },
             };
-            let mut force_idr = idr_requested.swap(false, Ordering::Relaxed) || frame_seq == 0;
+            let mut force_idr = idr_requested.swap(false, Ordering::Relaxed)
+                || frame_seq == 0
+                || std::mem::take(&mut force_idr_after_capture_reset);
 
             let encoded = match frame {
                 CaptureFrame::Shm {
@@ -487,6 +496,43 @@ fn encoder_config(codec: Codec, width: u32, height: u32, fps: u8) -> NvencConfig
         Codec::H264 => NvencConfig::lan_h264(width, height, fps),
         Codec::Hevc => NvencConfig::wan_hevc(width, height, fps),
         Codec::Av1 => NvencConfig::lan_h264(width, height, fps),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn initialise_wayland_capture(
+    display_id: Option<&str>,
+    frame_tx: &Sender<CaptureFrame>,
+    frame_rx: &Receiver<CaptureFrame>,
+) -> Result<(CaptureMode, WaylandCapture, CaptureFrame)> {
+    match WaylandCapture::new(CaptureMode::DmaBuf, display_id, frame_tx.clone()) {
+        Ok(mut capture) => {
+            info!("pipeline thread: using Wayland DMA-BUF capture");
+            match receive_wayland_frame(&mut capture, frame_rx) {
+                Ok(frame) => Ok((CaptureMode::DmaBuf, capture, frame)),
+                Err(err) => {
+                    warn!(
+                        "DMA-BUF capture failed during first frame, falling back to SHM: {err:#}"
+                    );
+                    drop(capture);
+                    let mut shm_capture =
+                        WaylandCapture::new(CaptureMode::Shm, display_id, frame_tx.clone())
+                            .context("initialise Wayland SHM capture fallback")?;
+                    let frame = receive_wayland_frame(&mut shm_capture, frame_rx)
+                        .context("capture first SHM frame")?;
+                    Ok((CaptureMode::Shm, shm_capture, frame))
+                }
+            }
+        }
+        Err(err) => {
+            warn!("DMA-BUF capture unavailable, falling back to SHM: {err:#}");
+            let mut shm_capture =
+                WaylandCapture::new(CaptureMode::Shm, display_id, frame_tx.clone())
+                    .context("initialise Wayland SHM capture fallback")?;
+            let frame = receive_wayland_frame(&mut shm_capture, frame_rx)
+                .context("capture first SHM frame")?;
+            Ok((CaptureMode::Shm, shm_capture, frame))
+        }
     }
 }
 
