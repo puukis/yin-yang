@@ -1,0 +1,5 @@
+target/
+.claude/
+HANDOFF.md
+nv-codec-headers/
+.DS_Store
