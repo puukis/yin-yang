@@ -12,7 +12,7 @@ use anyhow::{anyhow, Context};
 use core_foundation::base::TCFType;
 #[cfg(target_os = "macos")]
 use core_video::{
-    metal_texture::CVMetalTexture,
+    metal_texture::{CVMetalTexture, CVMetalTextureGetTexture},
     metal_texture_cache::CVMetalTextureCache,
     pixel_buffer::{
         kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
@@ -21,9 +21,9 @@ use core_video::{
 };
 #[cfg(target_os = "macos")]
 use metal::{
-    CommandQueue, CompileOptions, Device, DeviceRef, MTLClearColor, MTLLoadAction, MTLPixelFormat,
-    MTLPrimitiveType, MTLStoreAction, MetalLayer, MetalLayerRef, RenderPassDescriptor,
-    RenderPipelineDescriptor, RenderPipelineState,
+    foreign_types::ForeignTypeRef as _, CommandQueue, CompileOptions, Device, DeviceRef,
+    MTLClearColor, MTLLoadAction, MTLPixelFormat, MTLPrimitiveType, MTLStoreAction, MetalLayer,
+    MetalLayerRef, RenderPassDescriptor, RenderPipelineDescriptor, RenderPipelineState, TextureRef,
 };
 #[cfg(target_os = "macos")]
 use objc::{msg_send, sel, sel_impl};
@@ -373,22 +373,12 @@ unsafe fn resize_window_and_layer(
 fn present_frame(state: &mut RendererState, frame: &RenderFrame) -> Result<()> {
     let pixel_buffer = &frame.pixel_buffer;
     let pixel_format = pixel_buffer.get_pixel_format();
-    info!(
-        "present_frame: pixel_format={:#x} planes={} y={}x{} uv={}x{}",
-        pixel_format,
-        pixel_buffer.get_plane_count(),
-        pixel_buffer.get_width_of_plane(0),
-        pixel_buffer.get_height_of_plane(0),
-        pixel_buffer.get_width_of_plane(1),
-        pixel_buffer.get_height_of_plane(1),
-    );
     let full_range = match pixel_format {
         kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange => false,
         kCVPixelFormatType_420YpCbCr8BiPlanarFullRange => true,
         other => bail!("unsupported pixel format for Metal presenter: {other:#x}"),
     };
 
-    info!("present_frame: creating luma CVMetalTexture");
     let y_cv_texture = create_cv_metal_texture(
         &state.texture_cache,
         pixel_buffer,
@@ -397,7 +387,6 @@ fn present_frame(state: &mut RendererState, frame: &RenderFrame) -> Result<()> {
         pixel_buffer.get_height_of_plane(0),
         0,
     )?;
-    info!("present_frame: creating chroma CVMetalTexture");
     let uv_cv_texture = create_cv_metal_texture(
         &state.texture_cache,
         pixel_buffer,
@@ -406,21 +395,28 @@ fn present_frame(state: &mut RendererState, frame: &RenderFrame) -> Result<()> {
         pixel_buffer.get_height_of_plane(1),
         1,
     )?;
-    info!("present_frame: unwrapping Metal textures");
-    let y_texture = y_cv_texture
-        .get_texture()
-        .context("CVMetalTexture did not expose a luma MTLTexture")?;
-    let uv_texture = uv_cv_texture
-        .get_texture()
-        .context("CVMetalTexture did not expose a chroma MTLTexture")?;
 
-    info!("present_frame: acquiring drawable");
+    // `CVMetalTextureGetTexture` returns a non-retained pointer valid for the
+    // lifetime of the CVMetalTexture. The `get_texture()` helper wraps it in an
+    // owned `Texture` via `Texture::from_ptr`, which assumes a +1 retain that
+    // was never performed, so it over-releases the object on drop and corrupts
+    // the texture cache after a few frames.  Obtain a borrowed `&TextureRef`
+    // directly instead — no ownership, no retain/release.
+    let y_tex_raw = unsafe { CVMetalTextureGetTexture(y_cv_texture.as_concrete_TypeRef()) };
+    if y_tex_raw.is_null() {
+        bail!("CVMetalTexture did not expose a luma MTLTexture");
+    }
+    let y_texture: &TextureRef = unsafe { TextureRef::from_ptr(y_tex_raw) };
+    let uv_tex_raw = unsafe { CVMetalTextureGetTexture(uv_cv_texture.as_concrete_TypeRef()) };
+    if uv_tex_raw.is_null() {
+        bail!("CVMetalTexture did not expose a chroma MTLTexture");
+    }
+    let uv_texture: &TextureRef = unsafe { TextureRef::from_ptr(uv_tex_raw) };
+
     let Some(drawable) = state.layer.next_drawable() else {
-        info!("present_frame: no drawable available, skipping");
         return Ok(());
     };
 
-    info!("present_frame: building render pass descriptor");
     let pass_descriptor = RenderPassDescriptor::new();
     let color_attachment = pass_descriptor
         .color_attachments()
@@ -431,10 +427,8 @@ fn present_frame(state: &mut RendererState, frame: &RenderFrame) -> Result<()> {
     color_attachment.set_store_action(MTLStoreAction::Store);
     color_attachment.set_clear_color(MTLClearColor::new(0.0, 0.0, 0.0, 1.0));
 
-    info!("present_frame: creating command buffer and encoder");
     let command_buffer = state.command_queue.new_command_buffer();
     let encoder = command_buffer.new_render_command_encoder(pass_descriptor);
-    info!("present_frame: encoding draw call (flipped={})", y_cv_texture.is_flipped());
     let vertices = fullscreen_vertices(y_cv_texture.is_flipped());
     let conversion = ColorConversionParams {
         full_range: full_range as u32,
@@ -446,22 +440,19 @@ fn present_frame(state: &mut RendererState, frame: &RenderFrame) -> Result<()> {
         std::mem::size_of_val(&vertices) as u64,
         vertices.as_ptr().cast(),
     );
-    encoder.set_fragment_texture(0, Some(&y_texture));
-    encoder.set_fragment_texture(1, Some(&uv_texture));
+    encoder.set_fragment_texture(0, Some(y_texture));
+    encoder.set_fragment_texture(1, Some(uv_texture));
     encoder.set_fragment_bytes(
         0,
         std::mem::size_of::<ColorConversionParams>() as u64,
         (&conversion as *const ColorConversionParams).cast(),
     );
     encoder.draw_primitives(MTLPrimitiveType::TriangleStrip, 0, 4);
-    info!("present_frame: ending encoding");
     encoder.end_encoding();
 
-    info!("present_frame: committing");
     command_buffer.present_drawable(drawable);
     command_buffer.commit();
 
-    info!("present_frame: done");
     Ok(())
 }
 
