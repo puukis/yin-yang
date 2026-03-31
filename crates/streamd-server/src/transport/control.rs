@@ -170,6 +170,8 @@ async fn handle_connection(incoming: quinn::Incoming) -> Result<()> {
     });
 
     // Start the pipeline (capture + encode + send)
+    let video_remote = SocketAddr::new(remote.ip(), video_port);
+
     let pipeline = PipelineHandle::start(
         codec,
         fps,
@@ -177,7 +179,7 @@ async fn handle_connection(incoming: quinn::Incoming) -> Result<()> {
         height,
         Some(selected_display.id.clone()),
         video_port,
-        remote,
+        video_remote,
     )?;
 
     // Control loop: heartbeats + IDR requests
