@@ -30,8 +30,8 @@ pub struct InputCapture {
 impl InputCapture {
     /// Start capturing global input events and forwarding them to `event_tx`.
     ///
-    /// Capture starts in relative-mouse mode so the remote stream is usable
-    /// immediately. Press `Ctrl+Alt+Delete` locally to toggle capture on/off.
+    /// Capture starts idle. Press `Ctrl+Alt+Delete` locally to toggle
+    /// relative-mouse capture on/off.
     pub fn start(event_tx: Sender<InputPacket>) -> Result<Self> {
         let captured = Arc::new(AtomicBool::new(false));
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -42,14 +42,9 @@ impl InputCapture {
             .name("streamd-input-capture".into())
             .spawn(move || run_capture(event_tx, worker_captured, worker_shutdown))?;
 
-        let handle = Self { captured, shutdown };
-        handle.capture();
-        Ok(handle)
-    }
+        info!("input capture ready; press Ctrl+Alt+Delete to enable mouse capture");
 
-    /// Enter relative mouse capture mode.
-    pub fn capture(&self) {
-        set_capture_mode(&self.captured, true);
+        Ok(Self { captured, shutdown })
     }
 
     /// Leave relative mouse capture mode.

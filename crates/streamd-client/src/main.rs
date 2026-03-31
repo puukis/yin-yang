@@ -110,6 +110,7 @@ fn run_macos_client(
     };
 
     let render_rx = session.take_render_rx()?;
+    info!("starting macOS Metal renderer on the main thread");
     let render_result = render::metal::VideoRenderer::run(
         render_rx,
         session.width,

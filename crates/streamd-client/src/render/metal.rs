@@ -149,11 +149,19 @@ fn render_loop_macos(
     use std::{thread, time::Duration};
 
     unsafe {
+        info!("macOS renderer startup: creating autorelease pool");
         let app_pool = NSAutoreleasePool::new(nil);
+        info!("macOS renderer startup: acquiring NSApplication");
         let app = NSApp();
+        info!("macOS renderer startup: configuring NSApplication");
         app.setActivationPolicy_(NSApplicationActivationPolicyRegular);
+        info!("macOS renderer startup: finishing launch");
         app.finishLaunching();
 
+        info!(
+            "macOS renderer startup: creating window for initial size {}x{}",
+            initial_width, initial_height
+        );
         let window = NSWindow::alloc(nil).initWithContentRect_styleMask_backing_defer_(
             NSRect::new(
                 NSPoint::new(0., 0.),
@@ -170,11 +178,14 @@ fn render_loop_macos(
         window.setReleasedWhenClosed_(NO);
         window.setTitle_(NSString::alloc(nil).init_str("streamd"));
 
+        info!("macOS renderer startup: creating Metal renderer state");
         let content_view = window.contentView();
         let mut renderer = RendererState::new()?;
+        info!("macOS renderer startup: attaching CAMetalLayer");
         content_view.setWantsLayer(YES);
         content_view.setLayer(<*mut _>::cast(renderer.layer.as_mut()));
         sync_layer_frame(content_view, renderer.layer.as_ref());
+        info!("macOS renderer startup: sizing window and layer");
         resize_window_and_layer(
             window,
             content_view,
@@ -183,8 +194,11 @@ fn render_loop_macos(
             initial_height,
         );
 
+        info!("macOS renderer startup: showing window");
         window.makeKeyAndOrderFront_(nil);
+        info!("macOS renderer startup: activating application");
         app.activateIgnoringOtherApps_(YES);
+        info!("macOS renderer startup: entering render loop");
 
         let mut current_size = (initial_width, initial_height);
         let mut first_frame_logged = false;
