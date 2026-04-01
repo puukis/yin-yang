@@ -49,7 +49,6 @@ streamd/
 │   ├── streamd-client/
 │   ├── streamd-proto/
 │   └── streamd-server/
-├── HANDOFF.md
 └── README.md
 ```
 
