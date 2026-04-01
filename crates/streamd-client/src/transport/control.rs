@@ -229,13 +229,13 @@ pub async fn connect_client_session(
     });
 
     // Video + cursor datagrams: single dispatch loop routes by type tag.
-    let (frame_tx, frame_rx) = crossbeam_channel::bounded::<crate::transport::video_rx::DecodedFrame>(8);
+    let (frame_tx, frame_rx) =
+        crossbeam_channel::bounded::<crate::transport::video_rx::DecodedFrame>(8);
     let datagram_conn = conn.clone();
     let datagram_cursor_store = cursor_store.clone();
     let datagram_shutdown = shutdown.clone();
     let datagram_task = tokio::spawn(async move {
-        let result =
-            datagram_dispatch_loop(datagram_conn, datagram_cursor_store, frame_tx).await;
+        let result = datagram_dispatch_loop(datagram_conn, datagram_cursor_store, frame_tx).await;
         datagram_shutdown.store(true, Ordering::Relaxed);
         if let Err(err) = &result {
             warn!("datagram dispatch loop ended: {err:#}");

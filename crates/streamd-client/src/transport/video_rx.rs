@@ -139,7 +139,10 @@ impl VideoFrameReassembler {
     /// while waiting for more fragments.
     pub fn push_datagram(&mut self, data: &[u8]) -> Option<DecodedFrame> {
         let Some((hdr, payload)) = parse_header(data) else {
-            debug!("video reassembler: unparsable datagram ({} bytes)", data.len());
+            debug!(
+                "video reassembler: unparsable datagram ({} bytes)",
+                data.len()
+            );
             return None;
         };
 
@@ -155,12 +158,15 @@ impl VideoFrameReassembler {
             self.first_fragment_logged = true;
         }
 
-        let entry = self.frames.entry(hdr.frame_seq).or_insert_with(|| FrameState {
-            slices: HashMap::new(),
-            num_slices_expected: None,
-            timestamp_us: hdr.timestamp_us,
-            is_keyframe: hdr.is_keyframe(),
-        });
+        let entry = self
+            .frames
+            .entry(hdr.frame_seq)
+            .or_insert_with(|| FrameState {
+                slices: HashMap::new(),
+                num_slices_expected: None,
+                timestamp_us: hdr.timestamp_us,
+                is_keyframe: hdr.is_keyframe(),
+            });
 
         if hdr.is_last_slice() {
             entry.num_slices_expected = Some(hdr.slice_idx + 1);
@@ -214,7 +220,8 @@ impl VideoFrameReassembler {
         // Evict incomplete frames that are too far behind to ever complete.
         let seq = hdr.frame_seq;
         let before = self.frames.len();
-        self.frames.retain(|&k, _| k > seq || seq.wrapping_sub(k) < 64);
+        self.frames
+            .retain(|&k, _| k > seq || seq.wrapping_sub(k) < 64);
         let evicted = before - self.frames.len();
         for _ in 0..evicted {
             self.stats.record_dropped();
