@@ -1,516 +1,296 @@
 # streamd
 
-`streamd` is a low-latency remote desktop prototype for personal use over LAN or WAN.
+![Rust](https://img.shields.io/badge/built_with-Rust-orange?logo=rust)
+![Server](https://img.shields.io/badge/server-Linux%20%7C%20Windows-blue?logo=linux)
+![Client](https://img.shields.io/badge/client-macOS-lightgrey?logo=apple)
+![Transport](https://img.shields.io/badge/transport-QUIC%20datagrams-blueviolet)
+![License](https://img.shields.io/badge/license-MIT-green)
 
-The primary target is:
+**Remote desktop over QUIC with subframe latency, hardware encode, hardware decode, and zero copy presentation.**
 
-- Arch/Linux server on Wayland with NVIDIA hardware encoding
-- macOS client with VideoToolbox decode and Metal presentation
+* **No head of line blocking**: video travels as QUIC unreliable datagrams; a lost packet drops one frame, not the stream
+* **Hardware everywhere**: NVIDIA NVENC encode on the server, VideoToolbox decode + Metal zero copy present on the Mac
+* **Single UDP port, no relay**: the client opens one outbound QUIC connection; WAN works with one port forward, no VPN
+* **Multiple codec negotiation**: H.264, HEVC, or AV1; client sends a preference list, server picks the best it supports
+* **HID based input**: keyboard events use USB HID usage codes so layout differences between Mac and Linux never matter
 
-The project is written in Rust and split into three crates:
+![streamd demo](docs/media/streamd-demo.gif)
 
-- `streamd-server`: capture, encode, transport, and input injection
-- `streamd-client`: receive, decode, render, and input capture
-- `streamd-proto`: shared packet definitions and framing helpers
+## Why not Moonlight / Parsec / RDP?
 
-## What It Does
+| | **streamd** | Moonlight | Parsec | RDP |
+|---|---|---|---|---|
+| Transport | QUIC unreliable datagrams | UDP | UDP (relay) | TCP |
+| Video encode | NVENC | NVENC / AMF / QSV | NVENC | H.264 software |
+| Client decode | VideoToolbox (HW) | various | various | various |
+| Presentation | Metal zero copy | various | various | various |
+| WAN setup | 1 UDP port forward | 1 UDP port forward | relay (no forward) | 1 TCP port |
+| Protocol | open (Rust / bincode) | open | proprietary | open |
+| Dependencies | none (self contained) | GameStream/Sunshine | Parsec daemon | RDP server |
+| Head of line blocking | no | no | no | yes |
 
-At a high level:
+streamd is a personal use tool, not a product. It exists because the interesting part, combining QUIC datagrams, Wayland DMA BUF, NVENC sliced encoding, and a zero copy Metal path, is worth building and understanding.
 
-1. The client opens a QUIC control connection to the server.
-2. The client asks the server which displays are available.
-3. The client chooses a display and requests a session.
-4. The server captures that display.
-5. The server encodes frames with NVENC and sends video as QUIC unreliable datagrams on the same connection.
-6. The client reassembles datagram fragments, decodes with VideoToolbox, and presents with Metal.
-7. Keyboard and mouse input flow back to the server over a dedicated QUIC unidirectional stream.
+## Architecture
 
-## Current Platform Status
+```mermaid
+flowchart LR
+    subgraph Server["Server (Linux / Windows)"]
+        C["Wayland capture\next-image-copy-capture-v1\nDMA-BUF → GBM\n(SHM fallback)"]
+        E["NVENC encode\nH.264 / HEVC / AV1\nsliceMode=3"]
+        F["Fragment + tag\n18-byte header\nper-path MTU"]
+        C --> E --> F
+    end
 
-| Platform | Role | Status |
-| --- | --- | --- |
-| Linux / Wayland / NVIDIA | Server | Primary path, implemented and locally smoke-tested |
-| macOS | Client | Primary path, implemented; real hardware validation should happen on a native Mac |
-| Windows / NVIDIA | Server | Implemented, but not the primary path documented here |
+    subgraph QUIC["QUIC connection  UDP/9000"]
+        D["Unreliable datagrams\nvideo fragments + cursor state"]
+        R["Reliable streams\ncontrol · input · cursor shape"]
+    end
 
-Important constraints:
+    subgraph Client["Client (macOS)"]
+        A["VideoFrameReassembler\nfragment reassembly\nIDR on loss"]
+        VT["VideoToolbox\nhardware decode"]
+        M["Metal present\nCVMetalTextureCache\nzero-copy"]
+        A --> VT --> M
+    end
 
-- The client is a macOS client for real video presentation.
-- The server is implemented for Linux and Windows.
-- The security model is intentionally relaxed for personal use on trusted networks.
-
-## Workspace Layout
-
-```text
-streamd/
-├── crates/
-│   ├── streamd-client/
-│   ├── streamd-proto/
-│   └── streamd-server/
-└── README.md
+    F -->|"DATAGRAM_TAG_VIDEO 0x02"| D --> A
+    R <-->|"ControlMsg (bincode)"| Server
+    R <-->|"InputPacket (HID codes)"| Client
 ```
 
-## Architecture Overview
-
-### Transport
-
-All traffic flows over a single QUIC connection from client to server on `UDP/9000`.
+### Transport channels
 
 | Channel | Direction | Mechanism |
-| --- | --- | --- |
+|---|---|---|
 | Control (session setup, IDR requests, heartbeats) | bidirectional | QUIC reliable stream |
-| Input (keyboard + mouse events) | client → server | QUIC unidirectional stream |
+| Input (keyboard + mouse) | client → server | QUIC unidirectional stream |
 | Video fragments | server → client | QUIC unreliable datagrams |
 | Cursor state | server → client | QUIC unreliable datagrams |
-| Cursor shape | server → client | QUIC reliable stream (control) |
+| Cursor shape | server → client | QUIC reliable stream |
 
-Because the client initiates the single outbound QUIC connection, **no inbound port
-forwarding is needed on the client side**. The server requires only `UDP/9000` to be
-reachable from the client. This makes WAN use straightforward — see [Connecting Over WAN](#connecting-over-wan).
+Because the client initiates the single outbound connection, **no inbound port forwarding is needed on the client side**.
 
-### Datagram Framing
+### Video pipeline detail
 
-Every QUIC unreliable datagram begins with a 1-byte type tag:
+**Server:**
+* Linux capture uses Wayland `ext-image-copy-capture-v1`, preferring DMA BUF + GBM (zero CPU copy), falling back to SHM
+* Windows capture uses DXGI Desktop Duplication
+* NVENC runs with `sliceMode=3`: slices can be sent as soon as they are encoded, before the full frame is done
+* Each frame is fragmented to the negotiated path MTU (`Connection::max_datagram_size()`), falling back to 1200 bytes
 
-| Tag | Value | Payload |
-| --- | --- | --- |
-| `DATAGRAM_TAG_VIDEO` | `0x02` | 18-byte `VideoPacketHeader` + encoded video data |
-| `DATAGRAM_TAG_CURSOR` | `0x01` | bincode-encoded `RemoteCursorState` |
+**Client:**
+* `VideoFrameReassembler` collects fragments by `(frame_seq, slice_idx, frag_idx)`
+* On too many consecutive lost fragments, the client sends `RequestIdr`: the server forces a keyframe, no reconnect needed
+* VideoToolbox performs hardware decode; Metal presents via `CVMetalTextureCache` without a CPU copy
 
-The client's `datagram_dispatch_loop` reads all datagrams on the connection and routes
-them by tag to the video reassembler or cursor store respectively.
+### Input pipeline
 
-### Video Path
+* Global keyboard + mouse captured on macOS
+* Serialized as `InputPacket` using USB HID usage codes (layout independent)
+* Linux injects via `/dev/uinput`; Windows via `SendInput`
+* Toggle local capture: **Ctrl+Alt+Delete**
 
-Server:
+## Quick Start
 
-- Linux capture uses Wayland `ext-image-copy-capture-v1`.
-- Linux prefers DMA-BUF + GBM when possible.
-- Linux falls back to shared memory capture when DMA-BUF is unavailable or unsupported.
-- Windows capture uses DXGI Desktop Duplication.
-- Encoding is done with NVENC.
-- Each encoded frame is fragmented into QUIC datagrams sized to the negotiated path MTU (`Connection::max_datagram_size()`), falling back to 1200 bytes if not yet known.
+### 1. Build
 
-Client:
+```bash
+# on the Linux server machine
+cargo build --release -p streamd-server
 
-- Datagram fragments are reassembled by `VideoFrameReassembler` into complete compressed frames.
-- VideoToolbox performs hardware decode on macOS.
-- Metal presents frames using a zero-copy `CVMetalTextureCache` path.
-- Incomplete frames (e.g. caused by packet loss) are evicted and an IDR request is sent.
+# on the Mac
+cargo build --release -p streamd-client
+```
 
-### Input Path
+### 2. Start the server
 
-- The macOS client captures global keyboard and mouse events.
-- Input is serialized as layout-independent HID-style events.
-- Linux injects input through `/dev/uinput`.
-- Windows injects input through `SendInput`.
+```bash
+RUST_LOG=info cargo run --release -p streamd-server -- 0.0.0.0:9000
+```
 
-### Display Selection
+### 3. List available displays from the Mac
 
-The client can query server displays and select one explicitly.
+```bash
+cargo run --release -p streamd-client -- 192.168.1.50:9000 --list-displays
+```
 
-The current client selectors accepted by `--display` are:
+```
+[0] wayland:67 HDMI-A-2 1920x1080 (ASUSTek COMPUTER INC VG279Q3A)
+[1] wayland:68 DP-3 3840x2160 (Samsung Odyssey G80SD)
+```
 
-- numeric display index
-- stable display id
-- exact display name
-- exact display description
+### 4. Connect
 
-If `--display` is omitted, the first advertised display is used.
+```bash
+cargo run --release -p streamd-client -- 192.168.1.50:9000 --display 1
+```
 
-## Security Model
+Grant **Accessibility** and **Input Monitoring** permissions when macOS prompts.
 
-This project is designed for a trusted personal network or direct WAN connection
-between machines you control. It is not hardened for hostile internet exposure.
+## Platform Status
 
-Current behavior:
-
-- The server generates a self-signed certificate at runtime.
-- The client accepts the server certificate without CA validation.
-- All traffic (video, input, control) is encrypted by QUIC/TLS 1.3.
-
-If you expose the server to the internet, anyone who can reach `UDP/9000` can attempt
-a connection. You should restrict access at the network/firewall level.
+| Platform | Role | Status |
+|---|---|---|
+| Linux / Wayland / NVIDIA | Server | Primary path, implemented and smoke tested |
+| macOS | Client | Primary path, implemented; native Mac validation pending |
+| Windows / NVIDIA | Server | Implemented; not the primary documented path |
 
 ## Requirements
 
-### Server Requirements: Linux / Arch / Wayland / NVIDIA
+### Server: Linux / Arch / Wayland / NVIDIA
 
-You need:
+* Rust toolchain
+* `clang` / `libclang` (bindgen at build time)
+* NVIDIA GPU with NVENC support
+* NVIDIA driver providing `libcuda.so` and `libnvidia-encode.so`
+* Vendored `nvEncodeAPI.h` is used by default from `third_party/nv-codec-headers/include/ffnvcodec/`
+* Optional external header override via `NVENC_HEADER_PATH` or `NVENC_INCLUDE_DIR`
+* Wayland compositor exposing `ext-image-copy-capture-v1` and `ext-output-image-capture-source-manager-v1`
+* `/dev/uinput` write access (input injection)
+* DRM render node access (`/dev/dri/renderD*`)
 
-- Rust toolchain
-- `clang` / `libclang` for bindgen during build
-- NVIDIA GPU with NVENC support
-- NVIDIA driver stack providing:
-  - `libcuda.so`
-  - `libnvidia-encode.so`
-- NVENC headers installed so `nvEncodeAPI.h` exists at:
-  - `/usr/local/include/ffnvcodec/nvEncodeAPI.h`
-- Wayland compositor support for:
-  - `ext-image-copy-capture-v1`
-  - `ext-output-image-capture-source-manager-v1`
-- `/dev/uinput` access for input injection
-- DRM render node access in `/dev/dri`
-
-Notes:
-
-- The Linux fast path expects a compositor/device combination that can provide single-plane linear `XRGB8888` or `ARGB8888` DMA-BUF buffers.
-- If DMA-BUF is not available, the server falls back to SHM capture automatically.
-- The pipeline tries to enable `SCHED_FIFO` and CPU affinity on Linux. If that fails, the server continues, but logs a warning.
-
-Useful preflight checks on the server:
+Preflight checks:
 
 ```bash
 nvidia-smi
-ls /usr/local/include/ffnvcodec/nvEncodeAPI.h
-ls -l /dev/uinput /dev/dri/renderD* /dev/dri/card*
+ls -l /dev/uinput /dev/dri/renderD*
 printf 'WAYLAND_DISPLAY=%s\nXDG_SESSION_TYPE=%s\n' "$WAYLAND_DISPLAY" "$XDG_SESSION_TYPE"
 ```
 
-### Client Requirements: macOS
+### Client: macOS
 
-You need:
-
-- Rust toolchain
-- Xcode Command Line Tools
-- A Mac with VideoToolbox and Metal support
-- Accessibility permission for global input capture
-- Input Monitoring permission for global input capture
-
-Notes:
-
-- The real interactive client path is macOS-only.
-- Building the client for macOS should be done on the Mac itself.
-
-## Build
-
-From the repository root:
-
-```bash
-cargo build -p streamd-server
-cargo build -p streamd-client
-```
-
-If you only want fast compile validation:
-
-```bash
-cargo check -p streamd-proto
-cargo check -p streamd-server
-cargo check -p streamd-client
-```
-
-## Server Build Notes
-
-The NVENC path is enabled when the build can find `nvEncodeAPI.h`.
-
-The build script checks:
-
-- `NVENC_HEADER_PATH`
-- `NVENC_INCLUDE_DIR`
-- `NVENC_LIB_DIR`
-- `CUDA_PATH`
-
-On Linux, the default expected header location is:
-
-```text
-/usr/local/include/ffnvcodec/nvEncodeAPI.h
-```
-
-If the headers are missing, the server still compiles, but the NVENC encoder is replaced with a runtime error path.
-
-## Running the Server
-
-By default the server listens on:
-
-```text
-0.0.0.0:9000
-```
-
-Start it with:
-
-```bash
-cargo run -p streamd-server
-```
-
-Or bind to a specific address:
-
-```bash
-cargo run -p streamd-server -- 192.168.1.50:9000
-```
-
-Useful logging:
-
-```bash
-RUST_LOG=info cargo run -p streamd-server -- 0.0.0.0:9000
-RUST_LOG=debug cargo run -p streamd-server -- 0.0.0.0:9000
-```
-
-## Running the Client on macOS
-
-The client defaults to:
-
-```text
-127.0.0.1:9000
-```
-
-Usage:
-
-```bash
-cargo run -p streamd-client -- --help
-```
-
-Current CLI:
-
-```text
-streamd-client [server_addr] [--display <id|index|name>] [--list-displays]
-```
-
-## Real Test: Arch Server → Mac Client
-
-### 1. Start the server on the Arch machine
-
-```bash
-RUST_LOG=info cargo run -p streamd-server -- 0.0.0.0:9000
-```
-
-### 2. On the Mac, list available displays
-
-```bash
-cargo run -p streamd-client -- 192.168.1.50:9000 --list-displays
-```
-
-Example output:
-
-```text
-[0] wayland:67 HDMI-A-2 1920x1080 (ASUSTek COMPUTER INC VG279Q3A ...)
-[1] wayland:68 DP-3 3840x2160 (Samsung Electric Company Odyssey G80SD ...)
-```
-
-### 3. Start a session on the desired display
-
-By numeric index:
-
-```bash
-cargo run -p streamd-client -- 192.168.1.50:9000 --display 1
-```
-
-By stable display id:
-
-```bash
-cargo run -p streamd-client -- 192.168.1.50:9000 --display wayland:68
-```
-
-If you omit `--display`, the client requests the first display.
-
-### 4. Grant macOS permissions when prompted
-
-The client needs:
-
-- Accessibility
-- Input Monitoring
-
-Without those, video may still work, but local keyboard/mouse capture will not.
-
-### 5. Confirm firewall / network reachability
-
-The only requirement is that the client can reach `UDP/9000` on the server.
-No inbound port is required on the client.
-
-```
-client → server UDP/9000   (QUIC: control + input + video + cursor)
-```
-
-If the Mac has a firewall that blocks outbound UDP, make sure the client process
-is allowed to connect.
+* Rust toolchain + Xcode Command Line Tools
+* Mac with VideoToolbox and Metal support (any Apple Silicon or Intel Mac with a GPU)
+* **Accessibility** permission (global input capture)
+* **Input Monitoring** permission (global input capture)
 
 ## Connecting Over WAN
 
-Because all traffic runs over the single outbound QUIC connection, connecting
-from outside your home network requires only one change to your router: forward
-`UDP/9000` to the server machine's LAN IP. No port forwarding is needed on the
-client side.
+All traffic runs over the single outbound QUIC connection. Only one change is needed on your router.
 
-### Step 1 — Forward UDP/9000 on your home router
-
-In your router's port forwarding settings:
+**Step 1: Forward UDP/9000 on your home router**
 
 | Field | Value |
-| --- | --- |
+|---|---|
 | Protocol | UDP |
 | External port | 9000 |
-| Internal IP | your server's LAN IP (e.g. `192.168.1.50`) |
+| Internal IP | server LAN IP (e.g. `192.168.1.50`) |
 | Internal port | 9000 |
 
-### Step 2 — Find your home's public IP
-
-Run on the server machine:
+**Step 2: Find your public IP**
 
 ```bash
 curl ifconfig.me
 ```
 
-Or use a DDNS service (DuckDNS, Cloudflare) if your ISP assigns a dynamic IP so
-the address stays stable across reconnects.
+Or use a DDNS service (DuckDNS, Cloudflare) for a stable hostname.
 
-### Step 3 — Connect from anywhere
-
-```bash
-cargo run -p streamd-client -- <your-public-ip>:9000 --display 0
-```
-
-Or with a DDNS hostname:
+**Step 3: Connect**
 
 ```bash
-cargo run -p streamd-client -- myhome.duckdns.org:9000 --display 0
+cargo run --release -p streamd-client -- <your-public-ip>:9000 --display 0
+# or with DDNS:
+cargo run --release -p streamd-client -- myhome.duckdns.org:9000 --display 0
 ```
 
-That is all. No VPN, no relay, no extra flags.
+No VPN. No relay. No extra flags.
 
-### WAN vs LAN differences
-
-| Aspect | LAN | WAN |
-| --- | --- | --- |
-| Port forward required | none | server UDP/9000 only |
+| | LAN | WAN |
+|---|---|---|
+| Port forward needed | none | server UDP/9000 only |
 | Client port forward | none | none |
-| Latency | < 1 ms network RTT | depends on distance (10–100 ms typical) |
-| Video fragment size | same (path MTU negotiated by QUIC) | same |
-| Connection command | `192.168.1.50:9000` | `<public-ip>:9000` |
+| Typical RTT | < 1 ms | 10 to 100 ms (distance dependent) |
 
-## Operational Notes
+## Build Notes
 
-### Capture Mode
+### NVENC detection
 
-On Linux, the server tries:
+The build script probes for `nvEncodeAPI.h` in order:
 
-1. Wayland DMA-BUF capture
-2. Wayland SHM capture fallback
+1. `NVENC_HEADER_PATH`
+2. `NVENC_INCLUDE_DIR`
+3. vendored `third_party/nv-codec-headers/include`
+4. `CUDA_PATH/include`
+5. `/usr/local/include`
 
-If you see DMA-BUF warnings in logs, the fallback path may still be perfectly usable for testing.
+`NVENC_LIB_DIR` only affects library search paths. It is not used for header discovery.
 
-### Input Toggle
+If the header is missing, the server still compiles. The NVENC encoder is replaced with a runtime error path so the crate structure stays intact.
 
-The client currently toggles local input capture with `Ctrl+Alt+Delete`.
-
-### Display Enumeration
-
-Display ids are stable within the context of what the server currently advertises, but you should not assume they are globally portable across different machines or compositor restarts.
-
-### IDR Requests
-
-If the client detects that a frame cannot be completed (e.g. too many fragments
-lost in a row), it sends a `RequestIdr` control message to the server. The server
-responds by forcing a keyframe on the next encode, allowing the decoder to
-resync without a full reconnect. This happens automatically.
-
-## Troubleshooting
-
-### `NVENC headers were not found`
-
-Install `nv-codec-headers` and make sure `nvEncodeAPI.h` is visible to the build script.
-
-Expected location on Linux:
-
-```text
-/usr/local/include/ffnvcodec/nvEncodeAPI.h
-```
-
-### `open /dev/uinput` failed
-
-Your server user does not have permission to inject input.
-
-You need access to:
-
-```text
-/dev/uinput
-```
-
-### Wayland display enumeration fails
-
-If you get errors about `wl_output` or the image-copy-capture globals:
-
-- make sure you are really in a Wayland session
-- make sure the compositor exposes the capture protocols this project uses
-- make sure the process is running with the correct Wayland environment
-
-Useful check:
+### Check only builds
 
 ```bash
-echo "$XDG_SESSION_TYPE"
-echo "$WAYLAND_DISPLAY"
-```
-
-### DMA-BUF capture is unavailable
-
-That does not necessarily block testing.
-
-The server should fall back to SHM capture automatically. Expect higher CPU cost, but the stream can still work.
-
-### The client says decode/presentation is only supported on macOS
-
-That is expected. The real presentation path is macOS-only.
-
-`--list-displays` is still useful as a smoke test, but actual interactive playback is intended for a Mac client.
-
-### macOS client build from Linux fails
-
-That is also expected unless your Linux machine has a proper macOS cross-compilation C toolchain.
-
-Build the client on the Mac itself for real testing.
-
-### Video is choppy or freezes over WAN
-
-This usually means packet loss is causing many frames to be dropped for missing
-fragments. The client will automatically request IDR keyframes to recover. If
-the problem is persistent:
-
-- Check that `UDP/9000` is correctly forwarded on the server's router.
-- Check that the client's outbound UDP is not filtered by a corporate firewall.
-- Try reducing the target framerate or resolution by modifying the `SessionRequest`
-  in `crates/streamd-client/src/transport/control.rs`.
-
-### Version mismatch error on connect
-
-Both client and server must be built from the same source tree. Protocol version
-is checked during the handshake and the server will reject connections from
-clients built against an older or newer protocol.
-
-## Validation Status
-
-As of the current repository state:
-
-- `cargo build -p streamd-server` passes
-- `cargo build -p streamd-client` passes on the development machine as a host build
-- `cargo check -p streamd-proto` passes
-- local server startup works
-- local `streamd-client --list-displays` against the server works and returns real Wayland outputs
-
-What still needs real hardware validation:
-
-- full interactive macOS playback on a native Mac
-- end-to-end input behavior on the target Mac
-- compositor-specific behavior under your exact Wayland setup
-- longer-duration stability and latency under real network conditions
-- WAN path validation through a real NAT/router
-
-## Known Tradeoffs
-
-- Security is intentionally permissive for personal/trusted-network deployment.
-- The client currently uses a CLI, not a dedicated UI.
-- The Linux fast path depends on compositor DMA-BUF behavior.
-- The Windows server path exists, but this README is focused on the Linux → macOS flow.
-- QUIC datagrams are subject to the connection's congestion window. On a heavily
-  congested path, the send rate may be throttled more than raw UDP would be.
-  In practice this provides better long-term throughput stability.
-
-## Development
-
-Helpful commands:
-
-```bash
-cargo fmt --all
 cargo check -p streamd-proto
 cargo check -p streamd-server
 cargo check -p streamd-client
 ```
 
-If you are changing protocol types, update both client and server in the same change, because the control protocol version is currently `4`.
+## Protocol
+
+Both sides must be built from the same source tree. The protocol version is checked during the QUIC handshake; mismatches are rejected immediately.
+
+**Current protocol version: 4**
+
+## Operational Notes
+
+| Topic | Detail |
+|---|---|
+| Input toggle | **Ctrl+Alt+Delete** captures / releases local keyboard and mouse |
+| Capture mode | Server tries DMA BUF first, falls back to SHM automatically |
+| IDR recovery | Client requests a keyframe automatically on sustained fragment loss |
+| Display selection | `--display` accepts index, stable id, exact name, or exact description |
+| Display ids | Stable within a server session; may change across compositor restarts |
+
+## Telemetry
+
+The server sends a `Heartbeat(ServerTelemetry)` on the control stream each second. Fields include:
+
+| Field | Meaning |
+|---|---|
+| `avg_capture_wait_us` | Time waiting for / obtaining a frame from the compositor |
+| `avg_capture_convert_us` | Time preparing the frame for NVENC |
+| `avg_encode_us` | NVENC encode time per frame |
+| `avg_send_us` | Packetisation + QUIC send time |
+| `avg_pipeline_us` | Total capture to send pipeline per frame |
+| `idr_count` | IDR frames sent in the last second (spikes indicate packet loss) |
+
+## Troubleshooting
+
+**`NVENC headers were not found`**
+The repo expects the vendored header at `third_party/nv-codec-headers/include/ffnvcodec/nvEncodeAPI.h`. If you want to use a different copy, set `NVENC_HEADER_PATH` or `NVENC_INCLUDE_DIR`.
+
+**`open /dev/uinput` failed**
+Add your user to the `input` group or set a udev rule granting write access to `/dev/uinput`.
+
+**Wayland display enumeration fails**
+Verify you are in a real Wayland session (`echo $XDG_SESSION_TYPE`) and that the compositor exposes the required capture protocols.
+
+**DMA BUF capture unavailable**
+Not a blocker. The server falls back to SHM capture. Expect higher CPU usage; the stream still works.
+
+**Video choppy or freezing over WAN**
+Usually fragment loss causing frame eviction. The client recovers automatically via IDR requests. Persistent issues:
+* Verify `UDP/9000` is correctly forwarded on the server router
+* Check the client's outbound UDP is not filtered by a corporate firewall
+
+**`version mismatch` on connect**
+Build client and server from the same source tree. Protocol version is enforced at handshake time.
+
+**macOS client build from Linux fails**
+Expected unless you have a full macOS cross compilation toolchain. Build the client on the Mac.
+
+## Known Tradeoffs
+
+* Security is intentionally permissive, self signed cert, no CA validation. Restrict access at the firewall for internet exposure.
+* CLI only client; no GUI.
+* The Linux fast path depends on the compositor providing single plane linear DMA BUF buffers.
+* QUIC congestion control may throttle send rate on a heavily loaded path more than raw UDP would. In practice this gives better long term stability.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## License
+
+MIT. See [LICENSE](LICENSE).
