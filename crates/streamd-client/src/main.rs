@@ -1,3 +1,4 @@
+mod cursor;
 mod decode;
 mod input;
 mod render;
@@ -115,6 +116,7 @@ fn run_macos_client(
         render_rx,
         session.width,
         session.height,
+        session.cursor_store(),
         session.shutdown_signal(),
     );
     let shutdown_result = runtime.block_on(session.shutdown());

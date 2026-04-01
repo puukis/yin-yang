@@ -9,7 +9,7 @@ use std::sync::{
     Arc,
 };
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
 
 use streamd_proto::packets::parse_video_header as parse_header;
@@ -22,6 +22,7 @@ pub struct DecodedFrame {
     pub frame_seq: u32,
     pub timestamp_us: u64,
     pub is_keyframe: bool,
+    pub received_at_us: u64,
 }
 
 pub struct VideoReceiver {
@@ -108,6 +109,42 @@ struct SliceState {
     total: u16,
 }
 
+struct ReceiverStats {
+    assembled_frames: u32,
+    dropped_frames: u32,
+    window_started_at: Instant,
+}
+
+impl ReceiverStats {
+    fn new() -> Self {
+        Self {
+            assembled_frames: 0,
+            dropped_frames: 0,
+            window_started_at: Instant::now(),
+        }
+    }
+
+    fn record_assembled(&mut self) {
+        self.assembled_frames += 1;
+    }
+
+    fn record_dropped(&mut self) {
+        self.dropped_frames += 1;
+    }
+
+    fn maybe_log(&mut self) {
+        if self.window_started_at.elapsed() < Duration::from_secs(1) {
+            return;
+        }
+
+        info!(
+            "video receiver telemetry: assembled={} dropped={}",
+            self.assembled_frames, self.dropped_frames
+        );
+        *self = Self::new();
+    }
+}
+
 impl SliceState {
     fn new(total: u16) -> Self {
         Self {
@@ -149,6 +186,7 @@ fn receive_loop(
     let mut first_fragment_logged = false;
     let mut first_parse_failure_logged = false;
     let mut first_frame_logged = false;
+    let mut receiver_stats = ReceiverStats::new();
 
     while !stop.load(Ordering::Relaxed) {
         let (n, peer) = match socket.recv_from(&mut buf) {
@@ -227,13 +265,16 @@ fn receive_loop(
                 data.extend_from_slice(&state.slices[&id].assemble());
             }
 
+            let received_at_us = now_local_us();
             match frame_tx.try_send(DecodedFrame {
                 data,
                 frame_seq: hdr.frame_seq,
                 timestamp_us: state.timestamp_us,
                 is_keyframe: state.is_keyframe,
+                received_at_us,
             }) {
-                Ok(()) | Err(crossbeam_channel::TrySendError::Full(_)) => {
+                Ok(()) => {
+                    receiver_stats.record_assembled();
                     if !first_frame_logged {
                         info!(
                             "video receiver assembled first frame seq={} keyframe={}",
@@ -242,8 +283,12 @@ fn receive_loop(
                         first_frame_logged = true;
                     }
                 }
+                Err(crossbeam_channel::TrySendError::Full(_)) => {
+                    receiver_stats.record_dropped();
+                }
                 Err(crossbeam_channel::TrySendError::Disconnected(_)) => break,
             }
+            receiver_stats.maybe_log();
 
             // Evict frames older than this one (they will never complete)
             let seq = hdr.frame_seq;
@@ -252,4 +297,11 @@ fn receive_loop(
     }
 
     info!("video receive thread exited");
+}
+
+fn now_local_us() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros() as u64
 }

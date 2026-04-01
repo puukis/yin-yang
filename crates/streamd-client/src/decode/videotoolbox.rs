@@ -31,6 +31,9 @@ pub struct RenderFrame {
     pub height: u32,
     pub frame_seq: u32,
     pub timestamp_us: u64,
+    pub received_at_us: u64,
+    pub decode_submitted_at_us: u64,
+    pub decoded_at_us: u64,
 }
 
 #[cfg(target_os = "macos")]
@@ -57,7 +60,7 @@ impl VideoToolboxDecoder {
         #[cfg(target_os = "macos")]
         {
             use crossbeam_channel::Sender;
-            use std::time::Duration;
+            use std::time::{Duration, Instant};
             use tracing::{debug, info, warn};
 
             use vt::*;
@@ -65,6 +68,46 @@ impl VideoToolboxDecoder {
             struct FrameMetadata {
                 frame_seq: u32,
                 timestamp_us: u64,
+                received_at_us: u64,
+                decode_submitted_at_us: u64,
+            }
+
+            struct DecodeSubmitStats {
+                submitted_frames: u32,
+                total_queue_us: u64,
+                window_started_at: Instant,
+            }
+
+            impl DecodeSubmitStats {
+                fn new() -> Self {
+                    Self {
+                        submitted_frames: 0,
+                        total_queue_us: 0,
+                        window_started_at: Instant::now(),
+                    }
+                }
+
+                fn record_submit(&mut self, queue_us: u32) {
+                    self.submitted_frames += 1;
+                    self.total_queue_us += queue_us as u64;
+                }
+
+                fn maybe_log(&mut self) {
+                    if self.window_started_at.elapsed() < Duration::from_secs(1) {
+                        return;
+                    }
+
+                    let avg_queue_us = if self.submitted_frames > 0 {
+                        (self.total_queue_us / self.submitted_frames as u64) as u32
+                    } else {
+                        0
+                    };
+                    info!(
+                        "decoder telemetry: submitted={} queue_to_submit={}µs",
+                        self.submitted_frames, avg_queue_us
+                    );
+                    *self = Self::new();
+                }
             }
 
             extern "C" fn decode_callback(
@@ -91,7 +134,13 @@ impl VideoToolboxDecoder {
                 };
                 let render_tx = unsafe { &*(refcon as *const Sender<RenderFrame>) };
 
-                match retain_pixel_buffer(image, metadata.frame_seq, metadata.timestamp_us) {
+                match retain_pixel_buffer(
+                    image,
+                    metadata.frame_seq,
+                    metadata.timestamp_us,
+                    metadata.received_at_us,
+                    metadata.decode_submitted_at_us,
+                ) {
                     Ok(frame) => match render_tx.try_send(frame) {
                         Ok(()) | Err(crossbeam_channel::TrySendError::Full(_)) => {}
                         Err(crossbeam_channel::TrySendError::Disconnected(_)) => {}
@@ -112,8 +161,8 @@ impl VideoToolboxDecoder {
 
                     let mut format_desc: CMVideoFormatDescriptionRef = std::ptr::null_mut();
                     let mut session: VTDecompressionSessionRef = std::ptr::null_mut();
-                    let mut sps: Option<Vec<u8>> = None;
-                    let mut pps: Option<Vec<u8>> = None;
+                    let mut parameter_sets: Option<(Vec<u8>, Vec<u8>)> = None;
+                    let mut decode_stats = DecodeSubmitStats::new();
 
                     let callback_tx = Box::new(render_tx.clone());
                     let callback_tx_ptr = Box::into_raw(callback_tx) as *mut std::ffi::c_void;
@@ -130,13 +179,15 @@ impl VideoToolboxDecoder {
                         if frame.is_keyframe {
                             let (new_sps, new_pps) = extract_sps_pps(&frame.data);
                             if let (Some(new_sps), Some(new_pps)) = (new_sps, new_pps) {
-                                sps = Some(new_sps);
-                                pps = Some(new_pps);
+                                parameter_sets = Some((new_sps, new_pps));
+                                let (sps, pps) = parameter_sets
+                                    .as_ref()
+                                    .expect("parameter sets were just stored");
                                 recreate_session(
                                     &mut session,
                                     &mut format_desc,
-                                    sps.as_deref().unwrap_or_default(),
-                                    pps.as_deref().unwrap_or_default(),
+                                    sps,
+                                    pps,
                                     &decoder_spec,
                                     &image_attrs,
                                     callback_tx_ptr,
@@ -209,9 +260,17 @@ impl VideoToolboxDecoder {
                             continue;
                         }
 
+                        let decode_submitted_at_us = now_local_us();
+                        decode_stats.record_submit(
+                            decode_submitted_at_us.saturating_sub(frame.received_at_us) as u32,
+                        );
+                        decode_stats.maybe_log();
+
                         let metadata = Box::new(FrameMetadata {
                             frame_seq: frame.frame_seq,
                             timestamp_us: frame.timestamp_us,
+                            received_at_us: frame.received_at_us,
+                            decode_submitted_at_us,
                         });
                         let metadata_ptr = Box::into_raw(metadata) as *mut std::ffi::c_void;
                         let status = unsafe {
@@ -333,6 +392,8 @@ fn retain_pixel_buffer(
     image: CVPixelBufferRef,
     frame_seq: u32,
     timestamp_us: u64,
+    received_at_us: u64,
+    decode_submitted_at_us: u64,
 ) -> Result<RenderFrame> {
     use tracing::info;
 
@@ -340,6 +401,7 @@ fn retain_pixel_buffer(
     let width = pixel_buffer.get_width() as u32;
     let height = pixel_buffer.get_height() as u32;
     let pixel_format = pixel_buffer.get_pixel_format();
+    let decoded_at_us = now_local_us();
 
     anyhow::ensure!(
         pixel_buffer.is_planar(),
@@ -369,7 +431,20 @@ fn retain_pixel_buffer(
         height,
         frame_seq,
         timestamp_us,
+        received_at_us,
+        decode_submitted_at_us,
+        decoded_at_us,
     })
+}
+
+#[cfg(target_os = "macos")]
+fn now_local_us() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros() as u64
 }
 
 #[cfg(target_os = "macos")]

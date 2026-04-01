@@ -36,7 +36,7 @@ use wayland_protocols::wp::linux_dmabuf::zv1::client::{
     zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
 };
 
-use crate::capture::{CaptureFrame, DmabufPixelFormat, ShmPixelFormat};
+use crate::capture::{CaptureFrame, CaptureStats, DmabufPixelFormat, ShmPixelFormat};
 
 const GBM_BO_USE_RENDERING: u32 = 1 << 2;
 const GBM_BO_USE_LINEAR: u32 = 1 << 4;
@@ -551,6 +551,7 @@ impl State {
                     stride,
                     format,
                     timestamp_us,
+                    stats: CaptureStats::default(),
                 })
             }
             CaptureMode::DmaBuf => {
@@ -570,6 +571,7 @@ impl State {
                     format: dmabuf_buf.format,
                     modifier: dmabuf_buf.modifier,
                     timestamp_us,
+                    stats: CaptureStats::default(),
                 })
             }
         };

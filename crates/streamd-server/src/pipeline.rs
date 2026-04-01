@@ -4,60 +4,94 @@
 //! with SCHED_FIFO priority 50 to prevent kernel preemption mid-frame.
 
 use anyhow::{Context, Result};
-use crossbeam_channel::{bounded, Receiver, Sender};
+use crossbeam_channel::{bounded, Receiver};
 #[cfg(target_os = "linux")]
 use std::collections::HashSet;
-use std::future::Future;
 use std::net::SocketAddr;
-use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use streamd_proto::packets::{Codec, ServerTelemetry, MTU_WAN};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tracing::{info, warn};
 
 #[cfg(target_os = "linux")]
 use crate::capture::wayland::{CaptureMode, WaylandCapture};
 #[cfg(target_os = "windows")]
 use crate::capture::windows::WindowsCapture;
-use crate::capture::CaptureFrame;
+use crate::capture::{CaptureFrame, CaptureStats, CursorEvent};
 use crate::encode::nvenc::{NvencConfig, NvencEncoder};
 use crate::transport::video_tx::VideoSender;
 
 /// Statistics tracked by the pipeline thread for telemetry.
 struct Stats {
+    total_capture_wait_us: u64,
+    total_capture_convert_us: u64,
     total_encode_us: u64,
+    total_send_us: u64,
+    total_pipeline_us: u64,
     frame_count: u32,
     idr_count: u8,
-    window_start: Instant,
 }
 
 impl Stats {
     fn new() -> Self {
         Self {
+            total_capture_wait_us: 0,
+            total_capture_convert_us: 0,
             total_encode_us: 0,
+            total_send_us: 0,
+            total_pipeline_us: 0,
             frame_count: 0,
             idr_count: 0,
-            window_start: Instant::now(),
+        }
+    }
+
+    fn record(
+        &mut self,
+        capture_stats: CaptureStats,
+        encode_us: u32,
+        send_us: u32,
+        pipeline_us: u32,
+        is_keyframe: bool,
+    ) {
+        self.total_capture_wait_us += capture_stats.acquire_wait_us as u64;
+        self.total_capture_convert_us += capture_stats.convert_us as u64;
+        self.total_encode_us += encode_us as u64;
+        self.total_send_us += send_us as u64;
+        self.total_pipeline_us += pipeline_us as u64;
+        self.frame_count += 1;
+        if is_keyframe {
+            self.idr_count = self.idr_count.saturating_add(1);
         }
     }
 
     fn drain(&mut self) -> ServerTelemetry {
-        let avg = if self.frame_count > 0 {
-            (self.total_encode_us / self.frame_count as u64) as u32
-        } else {
-            0
+        let avg = |total: u64, frame_count: u32| {
+            if frame_count > 0 {
+                (total / frame_count as u64) as u32
+            } else {
+                0
+            }
         };
-        let t = ServerTelemetry {
-            avg_encode_us: avg,
+        let telemetry = ServerTelemetry {
+            avg_capture_wait_us: avg(self.total_capture_wait_us, self.frame_count),
+            avg_capture_convert_us: avg(self.total_capture_convert_us, self.frame_count),
+            avg_encode_us: avg(self.total_encode_us, self.frame_count),
+            avg_send_us: avg(self.total_send_us, self.frame_count),
+            avg_pipeline_us: avg(self.total_pipeline_us, self.frame_count),
             send_queue_frames: 0,
             idr_count: self.idr_count,
+            frame_count: self.frame_count,
         };
+        self.total_capture_wait_us = 0;
+        self.total_capture_convert_us = 0;
         self.total_encode_us = 0;
+        self.total_send_us = 0;
+        self.total_pipeline_us = 0;
         self.frame_count = 0;
         self.idr_count = 0;
-        self.window_start = Instant::now();
-        t
+        telemetry
     }
 }
 
@@ -65,7 +99,8 @@ impl Stats {
 pub struct PipelineHandle {
     idr_requested: Arc<AtomicBool>,
     stop_flag: Arc<AtomicBool>,
-    telemetry_rx: Receiver<ServerTelemetry>,
+    telemetry_rx: Option<UnboundedReceiver<ServerTelemetry>>,
+    cursor_rx: Option<UnboundedReceiver<CursorEvent>>,
 }
 
 impl PipelineHandle {
@@ -80,7 +115,8 @@ impl PipelineHandle {
     ) -> Result<Self> {
         let idr_requested = Arc::new(AtomicBool::new(false));
         let stop_flag = Arc::new(AtomicBool::new(false));
-        let (telemetry_tx, telemetry_rx) = bounded::<ServerTelemetry>(4);
+        let (telemetry_tx, telemetry_rx) = unbounded_channel::<ServerTelemetry>();
+        let (cursor_tx, cursor_rx) = unbounded_channel::<CursorEvent>();
 
         let idr_flag = idr_requested.clone();
         let stop = stop_flag.clone();
@@ -103,13 +139,15 @@ impl PipelineHandle {
                     idr_flag,
                     stop,
                     telemetry_tx,
+                    cursor_tx,
                 );
             })?;
 
         Ok(Self {
             idr_requested,
             stop_flag,
-            telemetry_rx,
+            telemetry_rx: Some(telemetry_rx),
+            cursor_rx: Some(cursor_rx),
         })
     }
 
@@ -121,14 +159,16 @@ impl PipelineHandle {
         self.stop_flag.store(true, Ordering::Relaxed);
     }
 
-    /// Returns the next telemetry packet (yields once per second).
-    pub fn next_telemetry(
-        &self,
-    ) -> Pin<Box<dyn Future<Output = Option<ServerTelemetry>> + Send + '_>> {
-        Box::pin(async {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            self.telemetry_rx.try_recv().ok()
-        })
+    pub fn take_telemetry_rx(&mut self) -> UnboundedReceiver<ServerTelemetry> {
+        self.telemetry_rx
+            .take()
+            .expect("telemetry receiver already taken")
+    }
+
+    pub fn take_cursor_rx(&mut self) -> UnboundedReceiver<CursorEvent> {
+        self.cursor_rx
+            .take()
+            .expect("cursor receiver already taken")
     }
 }
 
@@ -181,7 +221,8 @@ fn pipeline_thread(
     remote: SocketAddr,
     idr_requested: Arc<AtomicBool>,
     stop_flag: Arc<AtomicBool>,
-    telemetry_tx: Sender<ServerTelemetry>,
+    telemetry_tx: UnboundedSender<ServerTelemetry>,
+    cursor_tx: UnboundedSender<CursorEvent>,
 ) {
     if let Err(err) = run_pipeline_thread(
         codec,
@@ -194,6 +235,7 @@ fn pipeline_thread(
         idr_requested,
         stop_flag,
         telemetry_tx,
+        cursor_tx,
     ) {
         warn!("pipeline thread stopped with error: {err:#}");
     }
@@ -209,7 +251,8 @@ fn run_pipeline_thread(
     remote: SocketAddr,
     idr_requested: Arc<AtomicBool>,
     stop_flag: Arc<AtomicBool>,
-    telemetry_tx: Sender<ServerTelemetry>,
+    telemetry_tx: UnboundedSender<ServerTelemetry>,
+    cursor_tx: UnboundedSender<CursorEvent>,
 ) -> Result<()> {
     info!(
         "pipeline thread: {codec:?} {width}x{height}@{fps}fps display={} → {remote} udp:{video_port}",
@@ -277,7 +320,7 @@ fn run_pipeline_thread(
                 || frame_seq == 0
                 || std::mem::take(&mut force_idr_after_capture_reset);
 
-            let encoded = match frame {
+            let (encoded, capture_stats) = match frame {
                 CaptureFrame::Shm {
                     data,
                     width,
@@ -285,6 +328,7 @@ fn run_pipeline_thread(
                     stride,
                     format: _format,
                     timestamp_us,
+                    stats,
                 } => {
                     if width != capture_width || height != capture_height {
                         warn!(
@@ -303,9 +347,12 @@ fn run_pipeline_thread(
                         force_idr = true;
                     }
 
-                    encoder
-                        .encode_argb_frame(&data, stride, timestamp_us, force_idr)
-                        .context("encode Wayland SHM frame")?
+                    (
+                        encoder
+                            .encode_argb_frame(&data, stride, timestamp_us, force_idr)
+                            .context("encode Wayland SHM frame")?,
+                        stats,
+                    )
                 }
                 CaptureFrame::DmaBuf {
                     fd,
@@ -318,6 +365,7 @@ fn run_pipeline_thread(
                     format: _format,
                     modifier: _modifier,
                     timestamp_us,
+                    stats,
                 } => {
                     if width != capture_width || height != capture_height {
                         warn!(
@@ -354,24 +402,31 @@ fn run_pipeline_thread(
                             })?;
                     }
 
-                    encoder
-                        .encode_registered_dmabuf(buffer_id, timestamp_us, force_idr)
-                        .context("encode Wayland DMA-BUF frame")?
+                    (
+                        encoder
+                            .encode_registered_dmabuf(buffer_id, timestamp_us, force_idr)
+                            .context("encode Wayland DMA-BUF frame")?,
+                        stats,
+                    )
                 }
             };
 
+            let send_started_at = Instant::now();
             sender.send_frame(&encoded.slices, encoded.is_keyframe, encoded.timestamp_us);
+            let send_us = duration_to_us(send_started_at.elapsed());
 
-            stats.total_encode_us += encoded.encode_us as u64;
-            stats.frame_count += 1;
-            if encoded.is_keyframe {
-                stats.idr_count = stats.idr_count.saturating_add(1);
-            }
+            stats.record(
+                capture_stats,
+                encoded.encode_us,
+                send_us,
+                duration_to_us(frame_started_at.elapsed()),
+                encoded.is_keyframe,
+            );
             frame_seq = frame_seq.wrapping_add(1);
 
             if last_telemetry.elapsed() >= Duration::from_secs(1) {
                 let t = stats.drain();
-                let _ = telemetry_tx.try_send(t);
+                let _ = telemetry_tx.send(t);
                 last_telemetry = Instant::now();
             }
 
@@ -385,7 +440,7 @@ fn run_pipeline_thread(
     #[cfg(target_os = "windows")]
     {
         let (frame_tx, frame_rx) = bounded::<CaptureFrame>(2);
-        let mut capture = WindowsCapture::new(display_id.as_deref(), frame_tx)
+        let mut capture = WindowsCapture::new(display_id.as_deref(), frame_tx, cursor_tx.clone())
             .context("initialise Windows capture")?;
         let first_frame =
             receive_windows_frame(&mut capture, &frame_rx).context("capture first frame")?;
@@ -396,10 +451,41 @@ fn run_pipeline_thread(
             );
         }
 
-        let mut encoder =
-            NvencEncoder::new(encoder_config(codec, capture_width, capture_height, fps))
-                .context("initialise NVENC encoder")?;
         let mut pending_frame = Some(first_frame);
+        let mut encoder = match build_windows_encoder(
+            &capture,
+            matches!(
+                pending_frame.as_ref(),
+                Some(CaptureFrame::D3d11Texture { .. })
+            ),
+            encoder_config(codec, capture_width, capture_height, fps),
+        ) {
+            Ok(encoder) => encoder,
+            Err(err)
+                if matches!(
+                    pending_frame.as_ref(),
+                    Some(CaptureFrame::D3d11Texture { .. })
+                ) =>
+            {
+                warn!(
+                    "failed to initialise D3D11 NVENC path for first HDR frame: {err:#}; retrying with CPU conversion"
+                );
+                capture.disable_gpu_fp16();
+                let fallback_frame = receive_windows_frame(&mut capture, &frame_rx)
+                    .context("capture fallback Windows frame after D3D11 init failure")?;
+                let (width, height) = first_frame_dimensions(&fallback_frame)?;
+                capture_width = width;
+                capture_height = height;
+                pending_frame = Some(fallback_frame);
+                build_windows_encoder(
+                    &capture,
+                    false,
+                    encoder_config(codec, capture_width, capture_height, fps),
+                )
+                .context("initialise fallback CUDA-backed NVENC encoder")?
+            }
+            Err(err) => return Err(err).context("initialise NVENC encoder"),
+        };
 
         while !stop_flag.load(Ordering::Relaxed) {
             let frame_started_at = Instant::now();
@@ -408,8 +494,9 @@ fn run_pipeline_thread(
                 None => receive_windows_frame(&mut capture, &frame_rx)?,
             };
             let mut force_idr = idr_requested.swap(false, Ordering::Relaxed) || frame_seq == 0;
+            let frame_uses_d3d11 = matches!(frame, CaptureFrame::D3d11Texture { .. });
 
-            let encoded = match frame {
+            let (encoded, capture_stats) = match frame {
                 CaptureFrame::Shm {
                     data,
                     width,
@@ -417,26 +504,79 @@ fn run_pipeline_thread(
                     stride,
                     format: _format,
                     timestamp_us,
+                    stats,
                 } => {
-                    if width != capture_width || height != capture_height {
+                    if width != capture_width
+                        || height != capture_height
+                        || frame_uses_d3d11 != encoder.uses_d3d11_input()
+                    {
                         warn!(
                             "capture size changed: {capture_width}x{capture_height} -> {width}x{height}; reinitialising NVENC"
                         );
                         capture_width = width;
                         capture_height = height;
-                        encoder = NvencEncoder::new(encoder_config(
-                            codec,
-                            capture_width,
-                            capture_height,
-                            fps,
-                        ))
-                        .context("reinitialise NVENC encoder after resize")?;
+                        encoder = build_windows_encoder(
+                            &capture,
+                            false,
+                            encoder_config(codec, capture_width, capture_height, fps),
+                        )
+                        .context("reinitialise NVENC encoder after Windows frame change")?;
                         force_idr = true;
                     }
 
-                    encoder
-                        .encode_argb_frame(&data, stride, timestamp_us, force_idr)
-                        .context("encode Windows desktop frame")?
+                    (
+                        encoder
+                            .encode_argb_frame(&data, stride, timestamp_us, force_idr)
+                            .context("encode Windows desktop frame")?,
+                        stats,
+                    )
+                }
+                CaptureFrame::D3d11Texture {
+                    texture,
+                    resource_id,
+                    width,
+                    height,
+                    timestamp_us,
+                    stats,
+                } => {
+                    if width != capture_width
+                        || height != capture_height
+                        || frame_uses_d3d11 != encoder.uses_d3d11_input()
+                    {
+                        warn!(
+                            "capture size or input mode changed: {capture_width}x{capture_height} -> {width}x{height}; reinitialising NVENC"
+                        );
+                        capture_width = width;
+                        capture_height = height;
+                        match build_windows_encoder(
+                            &capture,
+                            true,
+                            encoder_config(codec, capture_width, capture_height, fps),
+                        ) {
+                            Ok(new_encoder) => {
+                                encoder = new_encoder;
+                                force_idr = true;
+                            }
+                            Err(err) => {
+                                warn!(
+                                    "failed to reinitialise D3D11 NVENC path: {err:#}; retrying with CPU conversion"
+                                );
+                                capture.disable_gpu_fp16();
+                                pending_frame =
+                                    Some(receive_windows_frame(&mut capture, &frame_rx).context(
+                                        "capture fallback Windows frame after D3D11 reinit failure",
+                                    )?);
+                                continue;
+                            }
+                        }
+                    }
+
+                    (
+                        encoder
+                            .encode_d3d11_texture(&texture, resource_id, timestamp_us, force_idr)
+                            .context("encode Windows HDR D3D11 frame")?,
+                        stats,
+                    )
                 }
                 #[cfg(target_os = "linux")]
                 CaptureFrame::DmaBuf { .. } => {
@@ -444,18 +584,22 @@ fn run_pipeline_thread(
                 }
             };
 
+            let send_started_at = Instant::now();
             sender.send_frame(&encoded.slices, encoded.is_keyframe, encoded.timestamp_us);
+            let send_us = duration_to_us(send_started_at.elapsed());
 
-            stats.total_encode_us += encoded.encode_us as u64;
-            stats.frame_count += 1;
-            if encoded.is_keyframe {
-                stats.idr_count = stats.idr_count.saturating_add(1);
-            }
+            stats.record(
+                capture_stats,
+                encoded.encode_us,
+                send_us,
+                duration_to_us(frame_started_at.elapsed()),
+                encoded.is_keyframe,
+            );
             frame_seq = frame_seq.wrapping_add(1);
 
             if last_telemetry.elapsed() >= Duration::from_secs(1) {
                 let t = stats.drain();
-                let _ = telemetry_tx.try_send(t);
+                let _ = telemetry_tx.send(t);
                 last_telemetry = Instant::now();
             }
 
@@ -479,6 +623,7 @@ fn run_pipeline_thread(
             idr_requested,
             stop_flag,
             telemetry_tx,
+            cursor_tx,
         );
         bail!("the server pipeline is only implemented on Linux and Windows");
     }
@@ -555,5 +700,25 @@ fn first_frame_dimensions(frame: &CaptureFrame) -> Result<(u32, u32)> {
         CaptureFrame::Shm { width, height, .. } => Ok((*width, *height)),
         #[cfg(target_os = "linux")]
         CaptureFrame::DmaBuf { width, height, .. } => Ok((*width, *height)),
+        #[cfg(target_os = "windows")]
+        CaptureFrame::D3d11Texture { width, height, .. } => Ok((*width, *height)),
     }
+}
+
+#[cfg(target_os = "windows")]
+fn build_windows_encoder(
+    capture: &WindowsCapture,
+    use_d3d11: bool,
+    config: NvencConfig,
+) -> Result<NvencEncoder> {
+    if use_d3d11 {
+        NvencEncoder::new_d3d11(config, &capture.d3d11_device())
+            .context("initialise D3D11 NVENC encoder")
+    } else {
+        NvencEncoder::new(config).context("initialise CUDA-backed NVENC encoder")
+    }
+}
+
+fn duration_to_us(duration: Duration) -> u32 {
+    duration.as_micros().min(u32::MAX as u128) as u32
 }

@@ -1456,6 +1456,7 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "bitflags 2.11.0",
+ "bytes",
  "serde",
  "thiserror 2.0.18",
 ]

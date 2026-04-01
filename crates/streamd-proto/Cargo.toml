@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 bincode = { workspace = true }
+bytes = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 bitflags = { version = "2.9", features = ["serde"] }

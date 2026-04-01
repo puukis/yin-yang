@@ -3,11 +3,14 @@
 //! Each message is length-prefixed: 4-byte little-endian `u32` followed by
 //! the bincode-encoded `ControlMsg` payload.
 
-use crate::packets::ControlMsg;
+use crate::packets::RemoteCursorState;
 use bincode::{
     config::standard,
     serde::{decode_from_slice, encode_to_vec},
 };
+use bytes::Bytes;
+
+use crate::packets::ControlMsg;
 
 /// Encode a `ControlMsg` into length-prefixed bytes ready to write to a QUIC stream.
 pub fn encode_msg(msg: &ControlMsg) -> Vec<u8> {
@@ -31,4 +34,17 @@ pub fn decode_msg(buf: &[u8]) -> Option<(ControlMsg, usize)> {
     }
     let (msg, _) = decode_from_slice::<ControlMsg, _>(&buf[4..4 + len], standard()).ok()?;
     Some((msg, 4 + len))
+}
+
+/// Encode a cursor-state datagram for QUIC datagram transport.
+pub fn encode_cursor_datagram(state: &RemoteCursorState) -> Bytes {
+    encode_to_vec(state, standard())
+        .expect("bincode encode cursor datagram")
+        .into()
+}
+
+/// Decode a cursor-state datagram received over QUIC datagrams.
+pub fn decode_cursor_datagram(buf: &[u8]) -> Option<RemoteCursorState> {
+    let (state, _) = decode_from_slice::<RemoteCursorState, _>(buf, standard()).ok()?;
+    Some(state)
 }

@@ -1,10 +1,12 @@
 #[cfg(target_os = "linux")]
 use std::os::fd::OwnedFd;
 
+#[cfg(target_os = "windows")]
+use ::windows::{core::Interface, Win32::Graphics::Direct3D11::ID3D11Texture2D};
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 use anyhow::bail;
 use anyhow::Result;
-use streamd_proto::packets::DisplayInfo;
+use streamd_proto::packets::{DisplayInfo, RemoteCursorShape, RemoteCursorState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShmPixelFormat {
@@ -19,6 +21,35 @@ pub enum DmabufPixelFormat {
     Argb8888,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CaptureStats {
+    pub acquire_wait_us: u32,
+    pub convert_us: u32,
+}
+
+#[derive(Debug, Clone)]
+pub enum CursorEvent {
+    Shape(RemoteCursorShape),
+    State(RemoteCursorState),
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone)]
+pub struct D3d11TextureHandle {
+    texture: ID3D11Texture2D,
+}
+
+#[cfg(target_os = "windows")]
+impl D3d11TextureHandle {
+    pub(crate) fn new(texture: ID3D11Texture2D) -> Self {
+        Self { texture }
+    }
+
+    pub(crate) fn as_raw_resource(&self) -> *mut std::ffi::c_void {
+        self.texture.as_raw()
+    }
+}
+
 /// A captured frame ready for encoding.
 pub enum CaptureFrame {
     /// Frame data in a CPU-accessible shared memory buffer.
@@ -30,6 +61,7 @@ pub enum CaptureFrame {
         stride: u32,
         format: ShmPixelFormat,
         timestamp_us: u64,
+        stats: CaptureStats,
     },
     /// Frame as a DMA-BUF file descriptor pointing at GPU memory.
     #[cfg(target_os = "linux")]
@@ -44,6 +76,17 @@ pub enum CaptureFrame {
         format: DmabufPixelFormat,
         modifier: u64,
         timestamp_us: u64,
+        stats: CaptureStats,
+    },
+    /// Frame as a persistent D3D11 texture ready for direct NVENC encoding.
+    #[cfg(target_os = "windows")]
+    D3d11Texture {
+        texture: D3d11TextureHandle,
+        resource_id: u64,
+        width: u32,
+        height: u32,
+        timestamp_us: u64,
+        stats: CaptureStats,
     },
 }
 

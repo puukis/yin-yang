@@ -183,6 +183,11 @@ pub enum ControlMsg {
     RequestIdr,
     /// Heartbeat with server-side telemetry.
     Heartbeat(ServerTelemetry),
+    /// Reliable cursor shape update from the server.
+    CursorShape(RemoteCursorShape),
+    /// Cursor state update. Usually delivered as a QUIC datagram, with this
+    /// stream variant available as a compatibility fallback.
+    CursorState(RemoteCursorState),
     /// Graceful shutdown.
     Goodbye,
 }
@@ -190,15 +195,51 @@ pub enum ControlMsg {
 /// Per-heartbeat telemetry stamped by the server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerTelemetry {
+    /// Average time spent waiting for/obtaining a frame from capture.
+    pub avg_capture_wait_us: u32,
+    /// Average time spent converting/preparing the frame for encode.
+    pub avg_capture_convert_us: u32,
     /// Average encode time in microseconds over the last second.
     pub avg_encode_us: u32,
+    /// Average time spent packetising and sending the frame over UDP.
+    pub avg_send_us: u32,
+    /// Average total pipeline time per frame.
+    pub avg_pipeline_us: u32,
     /// Current UDP send queue depth in frames.
     pub send_queue_frames: u8,
     /// Number of IDR frames sent in the last second.
     pub idr_count: u8,
+    /// Number of frames processed in the last telemetry window.
+    pub frame_count: u32,
 }
 
-pub const PROTOCOL_VERSION: u32 = 2;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RemoteCursorShapeKind {
+    Color,
+    MaskedColor,
+    Monochrome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteCursorShape {
+    pub generation: u64,
+    pub kind: RemoteCursorShapeKind,
+    pub width: u32,
+    pub height: u32,
+    pub pitch: u32,
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteCursorState {
+    pub timestamp_us: u64,
+    pub generation: u64,
+    pub visible: bool,
+    pub x: i32,
+    pub y: i32,
+}
+
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Parse a `VideoPacketHeader` from the first 18 bytes of a UDP datagram.
 /// Returns `(header, remaining_payload)` on success.

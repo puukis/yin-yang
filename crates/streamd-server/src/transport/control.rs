@@ -2,12 +2,13 @@
 
 use anyhow::{bail, Context, Result};
 use crossbeam_channel::TrySendError;
-use quinn::{Endpoint, RecvStream, SendStream, ServerConfig};
+use quinn::{Endpoint, RecvStream, SendDatagramError, SendStream, ServerConfig, TransportConfig};
 use rcgen::{CertificateParams, KeyPair};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::net::SocketAddr;
+use std::sync::Arc;
 use streamd_proto::{
-    control::{decode_msg, encode_msg},
+    control::{decode_msg, encode_cursor_datagram, encode_msg},
     input::decode_packet,
     packets::{
         Codec, ControlMsg, DisplayInfo, InputPacket, SessionAccept, SessionReject, SessionRequest,
@@ -16,7 +17,7 @@ use streamd_proto::{
 };
 use tracing::{debug, error, info, warn};
 
-use crate::pipeline::PipelineHandle;
+use crate::{capture::CursorEvent, pipeline::PipelineHandle};
 
 pub async fn run_server(bind_addr: SocketAddr) -> Result<()> {
     let endpoint = make_server_endpoint(bind_addr)?;
@@ -172,7 +173,7 @@ async fn handle_connection(incoming: quinn::Incoming) -> Result<()> {
     // Start the pipeline (capture + encode + send)
     let video_remote = SocketAddr::new(remote.ip(), video_port);
 
-    let pipeline = PipelineHandle::start(
+    let mut pipeline = PipelineHandle::start(
         codec,
         fps,
         width,
@@ -181,8 +182,12 @@ async fn handle_connection(incoming: quinn::Incoming) -> Result<()> {
         video_port,
         video_remote,
     )?;
+    let mut telemetry_rx = pipeline.take_telemetry_rx();
+    let mut cursor_rx = pipeline.take_cursor_rx();
 
     // Control loop: heartbeats + IDR requests
+    let mut cursor_datagrams_supported = conn.max_datagram_size().is_some();
+
     loop {
         tokio::select! {
             msg = read_control_msg(&mut recv) => {
@@ -200,9 +205,34 @@ async fn handle_connection(incoming: quinn::Incoming) -> Result<()> {
                     }
                 }
             }
-            telemetry = pipeline.next_telemetry() => {
+            telemetry = telemetry_rx.recv() => {
                 if let Some(t) = telemetry {
                     send_msg(&mut send, ControlMsg::Heartbeat(t)).await?;
+                }
+            }
+            cursor_event = cursor_rx.recv() => {
+                match cursor_event {
+                    Some(CursorEvent::Shape(shape)) => {
+                        send_msg(&mut send, ControlMsg::CursorShape(shape)).await?;
+                    }
+                    Some(CursorEvent::State(state)) => {
+                        if cursor_datagrams_supported {
+                            match conn.send_datagram(encode_cursor_datagram(&state)) {
+                                Ok(()) => {}
+                                Err(SendDatagramError::UnsupportedByPeer | SendDatagramError::Disabled | SendDatagramError::TooLarge) => {
+                                    cursor_datagrams_supported = false;
+                                    send_msg(&mut send, ControlMsg::CursorState(state)).await?;
+                                }
+                                Err(SendDatagramError::ConnectionLost(err)) => {
+                                    info!("client {remote} disconnected while sending cursor datagram: {err}");
+                                    break;
+                                }
+                            }
+                        } else {
+                            send_msg(&mut send, ControlMsg::CursorState(state)).await?;
+                        }
+                    }
+                    None => break,
                 }
             }
         }
@@ -307,8 +337,12 @@ fn make_server_endpoint(bind_addr: SocketAddr) -> Result<Endpoint> {
     let cert_der = CertificateDer::from(cert.der().to_vec());
     let key_der = PrivateKeyDer::Pkcs8(key_pair.serialize_der().into());
 
-    let server_config = ServerConfig::with_single_cert(vec![cert_der], key_der)
+    let mut server_config = ServerConfig::with_single_cert(vec![cert_der], key_der)
         .context("build server TLS config")?;
+    let mut transport_config = TransportConfig::default();
+    transport_config.datagram_receive_buffer_size(Some(64 * 1024));
+    transport_config.datagram_send_buffer_size(64 * 1024);
+    server_config.transport_config(Arc::new(transport_config));
 
     let endpoint = Endpoint::server(server_config, bind_addr).context("create QUIC endpoint")?;
     Ok(endpoint)

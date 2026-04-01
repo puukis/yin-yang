@@ -125,16 +125,19 @@ pub use real::NvencEncoder;
 mod real {
     use super::*;
     use ffi::*;
+    use std::collections::HashMap;
     use std::ffi::c_void;
     use std::ptr;
     use std::time::Instant;
 
     #[cfg(target_os = "windows")]
+    use crate::capture::D3d11TextureHandle;
+    #[cfg(target_os = "windows")]
     use libloading::Library;
     #[cfg(target_os = "linux")]
-    use std::collections::HashMap;
-    #[cfg(target_os = "linux")]
     use std::os::fd::OwnedFd;
+    #[cfg(target_os = "windows")]
+    use windows::{core::Interface, Win32::Graphics::Direct3D11::ID3D11Device};
 
     #[cfg(target_os = "linux")]
     mod cuda {
@@ -494,10 +497,19 @@ mod real {
         _library: Library,
     }
 
+    #[cfg(target_os = "windows")]
+    enum SessionDevice {
+        Cuda { _context: CudaContext },
+        D3d11 { _device: ID3D11Device },
+    }
+
     pub struct NvencEncoder {
         encoder: *mut c_void,
         api: NV_ENCODE_API_FUNCTION_LIST,
         config: NvencConfig,
+        #[cfg(target_os = "windows")]
+        _session_device: SessionDevice,
+        #[cfg(not(target_os = "windows"))]
         _cuda_ctx: CudaContext,
         #[cfg(target_os = "windows")]
         _nvenc_library: NvencLibrary,
@@ -505,6 +517,8 @@ mod real {
         out_bufs: Vec<NV_ENC_OUTPUT_PTR>,
         #[cfg(target_os = "linux")]
         dmabuf_resources: HashMap<u64, DmabufResource>,
+        #[cfg(target_os = "windows")]
+        d3d11_resources: HashMap<u64, D3d11RegisteredResource>,
         ring_idx: usize,
     }
 
@@ -515,6 +529,13 @@ mod real {
         external_memory: ExternalMemory,
         registered: usize,
         pitch: u32,
+        format: NvencInputFormat,
+    }
+
+    #[cfg(target_os = "windows")]
+    struct D3d11RegisteredResource {
+        texture: D3d11TextureHandle,
+        registered: usize,
         format: NvencInputFormat,
     }
 
@@ -553,6 +574,23 @@ mod real {
             let device_ctx =
                 CudaContext::create_default().context("create CUDA context for NVENC")?;
             Self::with_cuda_context(config, device_ctx)
+        }
+
+        #[cfg(target_os = "windows")]
+        pub fn new_d3d11(config: NvencConfig, device: &ID3D11Device) -> Result<Self> {
+            Self::with_d3d11_device(config, device.clone())
+        }
+
+        pub fn uses_d3d11_input(&self) -> bool {
+            #[cfg(target_os = "windows")]
+            {
+                matches!(&self._session_device, SessionDevice::D3d11 { .. })
+            }
+
+            #[cfg(not(target_os = "windows"))]
+            {
+                false
+            }
         }
 
         /// Initialise the NVENC encoder using an existing CUDA context.
@@ -721,6 +759,11 @@ mod real {
                 encoder,
                 api,
                 config,
+                #[cfg(target_os = "windows")]
+                _session_device: SessionDevice::Cuda {
+                    _context: device_ctx,
+                },
+                #[cfg(not(target_os = "windows"))]
                 _cuda_ctx: device_ctx,
                 #[cfg(target_os = "windows")]
                 _nvenc_library: nvenc_library,
@@ -728,6 +771,149 @@ mod real {
                 out_bufs,
                 #[cfg(target_os = "linux")]
                 dmabuf_resources: HashMap::new(),
+                #[cfg(target_os = "windows")]
+                d3d11_resources: HashMap::new(),
+                ring_idx: 0,
+            })
+        }
+
+        #[cfg(target_os = "windows")]
+        fn with_d3d11_device(config: NvencConfig, device: ID3D11Device) -> Result<Self> {
+            let mut api = NV_ENCODE_API_FUNCTION_LIST {
+                version: NV_ENCODE_API_FUNCTION_LIST_VER,
+                ..Default::default()
+            };
+            let nvenc_library = load_nvenc_api(&mut api)?;
+
+            let mut open_params = NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS {
+                version: NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER,
+                deviceType: NV_ENC_DEVICE_TYPE_DIRECTX,
+                device: device.as_raw(),
+                apiVersion: NVENCAPI_VERSION,
+                ..Default::default()
+            };
+            let mut encoder: *mut c_void = ptr::null_mut();
+            let status =
+                unsafe { (api.nvEncOpenEncodeSessionEx.unwrap())(&mut open_params, &mut encoder) };
+            if status != NV_ENC_SUCCESS {
+                bail!("nvEncOpenEncodeSessionEx failed for D3D11: {status:?}");
+            }
+
+            let codec_guid = if config.h264 {
+                NV_ENC_CODEC_H264_GUID_VALUE
+            } else {
+                NV_ENC_CODEC_HEVC_GUID_VALUE
+            };
+            let preset_p1_guid = NV_ENC_PRESET_P1_GUID_VALUE;
+
+            let mut enc_config = NV_ENC_CONFIG {
+                version: NV_ENC_CONFIG_VER,
+                ..Default::default()
+            };
+            let preset_config_params = NV_ENC_PRESET_CONFIG {
+                version: NV_ENC_PRESET_CONFIG_VER,
+                presetCfg: enc_config,
+                ..Default::default()
+            };
+            let mut preset_cfg = preset_config_params;
+            let status = unsafe {
+                (api.nvEncGetEncodePresetConfigEx.unwrap())(
+                    encoder,
+                    codec_guid,
+                    preset_p1_guid,
+                    NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY,
+                    &mut preset_cfg,
+                )
+            };
+            if status != NV_ENC_SUCCESS {
+                bail!("nvEncGetEncodePresetConfigEx failed: {status:?}");
+            }
+            enc_config = preset_cfg.presetCfg;
+
+            enc_config.rcParams.rateControlMode = NV_ENC_PARAMS_RC_CBR;
+            enc_config.rcParams.averageBitRate = config.bitrate_bps;
+            enc_config.rcParams.maxBitRate = config.bitrate_bps * 6 / 5;
+            enc_config.rcParams.vbvBufferSize = config.vbv_size();
+            enc_config.rcParams.vbvInitialDelay = config.vbv_size();
+            enc_config.rcParams.set_enableMinQP(1);
+            enc_config.rcParams.minQP.qpInterP = 20;
+            enc_config.rcParams.minQP.qpInterB = 20;
+            enc_config.rcParams.minQP.qpIntra = 20;
+
+            unsafe {
+                if config.h264 {
+                    enc_config.encodeCodecConfig.h264Config.sliceMode = 3;
+                    enc_config.encodeCodecConfig.h264Config.sliceModeData = 2;
+                    enc_config.encodeCodecConfig.h264Config.idrPeriod = NVENC_INFINITE_GOPLENGTH;
+                    enc_config.encodeCodecConfig.h264Config.set_repeatSPSPPS(1);
+                    enc_config.encodeCodecConfig.h264Config.set_outputAUD(0);
+                    enc_config.encodeCodecConfig.h264Config.set_disableSPSPPS(0);
+                } else {
+                    enc_config.encodeCodecConfig.hevcConfig.sliceMode = 3;
+                    enc_config.encodeCodecConfig.hevcConfig.sliceModeData = 2;
+                    enc_config.encodeCodecConfig.hevcConfig.idrPeriod = NVENC_INFINITE_GOPLENGTH;
+                    enc_config.encodeCodecConfig.hevcConfig.set_repeatSPSPPS(1);
+                }
+            }
+
+            enc_config.gopLength = NVENC_INFINITE_GOPLENGTH;
+            enc_config.frameIntervalP = 1;
+
+            let mut init_params = NV_ENC_INITIALIZE_PARAMS {
+                version: NV_ENC_INITIALIZE_PARAMS_VER,
+                encodeGUID: codec_guid,
+                presetGUID: preset_p1_guid,
+                tuningInfo: NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY,
+                encodeWidth: config.width,
+                encodeHeight: config.height,
+                darWidth: config.width,
+                darHeight: config.height,
+                frameRateNum: config.fps as u32,
+                frameRateDen: 1,
+                encodeConfig: &mut enc_config,
+                enableEncodeAsync: 0,
+                enablePTD: 1,
+                ..Default::default()
+            };
+            let status =
+                unsafe { (api.nvEncInitializeEncoder.unwrap())(encoder, &mut init_params) };
+            if status != NV_ENC_SUCCESS {
+                bail!("nvEncInitializeEncoder failed: {status:?}");
+            }
+
+            info!(
+                "NVENC encoder initialised (D3D11): {} {}x{}@{}fps {:.0}Mbps",
+                if config.h264 { "H.264" } else { "HEVC" },
+                config.width,
+                config.height,
+                config.fps,
+                config.bitrate_bps as f64 / 1e6,
+            );
+
+            let mut out_bufs = Vec::with_capacity(RING_DEPTH);
+            for _ in 0..RING_DEPTH {
+                let mut create_bitstream = NV_ENC_CREATE_BITSTREAM_BUFFER {
+                    version: NV_ENC_CREATE_BITSTREAM_BUFFER_VER,
+                    ..Default::default()
+                };
+                let status = unsafe {
+                    (api.nvEncCreateBitstreamBuffer.unwrap())(encoder, &mut create_bitstream)
+                };
+                if status != NV_ENC_SUCCESS {
+                    bail!("nvEncCreateBitstreamBuffer failed: {status:?}");
+                }
+                out_bufs.push(create_bitstream.bitstreamBuffer);
+            }
+
+            Ok(Self {
+                encoder,
+                api,
+                config,
+                _session_device: SessionDevice::D3d11 { _device: device },
+                _nvenc_library: nvenc_library,
+                in_bufs: Vec::new(),
+                out_bufs,
+                d3d11_resources: HashMap::new(),
                 ring_idx: 0,
             })
         }
@@ -906,6 +1092,139 @@ mod real {
             })
         }
 
+        #[cfg(target_os = "windows")]
+        fn register_directx_resource(
+            &mut self,
+            texture: &D3d11TextureHandle,
+            format: NvencInputFormat,
+        ) -> Result<usize> {
+            let mut reg = NV_ENC_REGISTER_RESOURCE {
+                version: NV_ENC_REGISTER_RESOURCE_VER,
+                resourceType: NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX,
+                width: self.config.width,
+                height: self.config.height,
+                pitch: 0,
+                subResourceIndex: 0,
+                resourceToRegister: texture.as_raw_resource(),
+                bufferFormat: nvenc_buffer_format(format),
+                bufferUsage: NV_ENC_INPUT_IMAGE,
+                ..Default::default()
+            };
+            let status =
+                unsafe { (self.api.nvEncRegisterResource.unwrap())(self.encoder, &mut reg) };
+            if status != NV_ENC_SUCCESS {
+                bail!("nvEncRegisterResource failed for D3D11 texture: {status:?}");
+            }
+            Ok(reg.registeredResource as usize)
+        }
+
+        #[cfg(target_os = "windows")]
+        pub fn encode_d3d11_texture(
+            &mut self,
+            texture: &D3d11TextureHandle,
+            resource_id: u64,
+            timestamp_us: u64,
+            force_idr: bool,
+        ) -> Result<EncodedFrame> {
+            let (registered, format) =
+                if let Some(resource) = self.d3d11_resources.get(&resource_id) {
+                    (resource.registered, resource.format)
+                } else {
+                    let registered = self
+                        .register_directx_resource(texture, NvencInputFormat::Argb)
+                        .context("register D3D11 texture with NVENC")?;
+                    self.d3d11_resources.insert(
+                        resource_id,
+                        D3d11RegisteredResource {
+                            texture: texture.clone(),
+                            registered,
+                            format: NvencInputFormat::Argb,
+                        },
+                    );
+                    (registered, NvencInputFormat::Argb)
+                };
+
+            let t0 = Instant::now();
+            let ring = self.ring_idx % RING_DEPTH;
+            self.ring_idx += 1;
+
+            let mut map = NV_ENC_MAP_INPUT_RESOURCE {
+                version: NV_ENC_MAP_INPUT_RESOURCE_VER,
+                registeredResource: registered as NV_ENC_REGISTERED_PTR,
+                ..Default::default()
+            };
+            let status =
+                unsafe { (self.api.nvEncMapInputResource.unwrap())(self.encoder, &mut map) };
+            if status != NV_ENC_SUCCESS {
+                bail!("nvEncMapInputResource failed for D3D11 texture: {status:?}");
+            }
+            let input_ptr = map.mappedResource;
+
+            let pic_params = NV_ENC_PIC_PARAMS {
+                version: NV_ENC_PIC_PARAMS_VER,
+                inputBuffer: input_ptr,
+                outputBitstream: self.out_bufs[ring],
+                inputWidth: self.config.width,
+                inputHeight: self.config.height,
+                inputPitch: self.config.width,
+                encodePicFlags: if force_idr {
+                    NV_ENC_PIC_FLAG_FORCEIDR as u32
+                } else {
+                    0
+                },
+                inputTimeStamp: timestamp_us,
+                pictureStruct: NV_ENC_PIC_STRUCT_FRAME,
+                bufferFmt: nvenc_buffer_format(format),
+                ..Default::default()
+            };
+
+            let status = unsafe {
+                (self.api.nvEncEncodePicture.unwrap())(self.encoder, &mut { pic_params })
+            };
+            if status != NV_ENC_SUCCESS && status != NV_ENC_ERR_NEED_MORE_INPUT {
+                let _ =
+                    unsafe { (self.api.nvEncUnmapInputResource.unwrap())(self.encoder, input_ptr) };
+                bail!("nvEncEncodePicture failed for D3D11 texture: {status:?}");
+            }
+
+            let mut lock = NV_ENC_LOCK_BITSTREAM {
+                version: NV_ENC_LOCK_BITSTREAM_VER,
+                outputBitstream: self.out_bufs[ring],
+                ..Default::default()
+            };
+            let status = unsafe { (self.api.nvEncLockBitstream.unwrap())(self.encoder, &mut lock) };
+            if status != NV_ENC_SUCCESS {
+                let _ =
+                    unsafe { (self.api.nvEncUnmapInputResource.unwrap())(self.encoder, input_ptr) };
+                bail!("nvEncLockBitstream failed: {status:?}");
+            }
+
+            let is_keyframe =
+                lock.pictureType == NV_ENC_PIC_TYPE_IDR || lock.pictureType == NV_ENC_PIC_TYPE_I;
+            let bitstream = unsafe {
+                std::slice::from_raw_parts(
+                    lock.bitstreamBufferPtr as *const u8,
+                    lock.bitstreamSizeInBytes as usize,
+                )
+            };
+            let frame_data = bitstream.to_vec();
+
+            unsafe {
+                (self.api.nvEncUnlockBitstream.unwrap())(self.encoder, self.out_bufs[ring]);
+                (self.api.nvEncUnmapInputResource.unwrap())(self.encoder, input_ptr);
+            }
+
+            let encode_us = t0.elapsed().as_micros() as u32;
+            let slices = split_into_slices(&frame_data);
+
+            Ok(EncodedFrame {
+                slices,
+                is_keyframe,
+                timestamp_us,
+                encode_us,
+            })
+        }
+
         /// Encode one CPU-accessible ARGB/XRGB frame copied from Wayland SHM.
         pub fn encode_argb_frame(
             &mut self,
@@ -914,6 +1233,10 @@ mod real {
             timestamp_us: u64,
             force_idr: bool,
         ) -> Result<EncodedFrame> {
+            if self.in_bufs.is_empty() {
+                bail!("this NVENC session was initialised for D3D11 direct input");
+            }
+
             let t0 = Instant::now();
             let ring = self.ring_idx % RING_DEPTH;
             self.ring_idx += 1;
@@ -1018,6 +1341,14 @@ mod real {
                         resource.registered as NV_ENC_REGISTERED_PTR,
                     );
                     drop(resource.external_memory);
+                }
+                #[cfg(target_os = "windows")]
+                for (_, resource) in self.d3d11_resources.drain() {
+                    let _ = (self.api.nvEncUnregisterResource.unwrap())(
+                        self.encoder,
+                        resource.registered as NV_ENC_REGISTERED_PTR,
+                    );
+                    drop(resource.texture);
                 }
                 for &buf in &self.in_bufs {
                     (self.api.nvEncDestroyInputBuffer.unwrap())(self.encoder, buf);
@@ -1141,10 +1472,33 @@ impl NvencEncoder {
         )
     }
 
+    #[cfg(target_os = "windows")]
+    pub fn new_d3d11(
+        _config: NvencConfig,
+        _device: &windows::Win32::Graphics::Direct3D11::ID3D11Device,
+    ) -> Result<Self> {
+        anyhow::bail!("NVENC not available")
+    }
+
+    pub fn uses_d3d11_input(&self) -> bool {
+        false
+    }
+
     pub fn encode_argb_frame(
         &mut self,
         _data: &[u8],
         _stride: u32,
+        _timestamp_us: u64,
+        _force_idr: bool,
+    ) -> Result<EncodedFrame> {
+        anyhow::bail!("NVENC not available")
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn encode_d3d11_texture(
+        &mut self,
+        _texture: &crate::capture::D3d11TextureHandle,
+        _resource_id: u64,
         _timestamp_us: u64,
         _force_idr: bool,
     ) -> Result<EncodedFrame> {

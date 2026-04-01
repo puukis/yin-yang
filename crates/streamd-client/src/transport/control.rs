@@ -2,7 +2,7 @@
 
 use anyhow::{bail, Context, Result};
 use crossbeam_channel::{Receiver, RecvTimeoutError};
-use quinn::{ClientConfig, Endpoint};
+use quinn::{ClientConfig, Endpoint, TransportConfig};
 use rustls::pki_types::ServerName;
 use std::net::SocketAddr;
 use std::sync::{
@@ -11,12 +11,13 @@ use std::sync::{
 };
 use std::time::Duration;
 use streamd_proto::{
-    control::{decode_msg, encode_msg},
+    control::{decode_cursor_datagram, decode_msg, encode_msg},
     input::encode_packet,
     packets::{Codec, ControlMsg, DisplayInfo, InputPacket, SessionRequest, PROTOCOL_VERSION},
 };
 use tracing::{info, warn};
 
+use crate::cursor::RemoteCursorStore;
 use crate::decode::videotoolbox::{RenderFrame, VideoToolboxDecoder};
 use crate::input::capture::InputCapture;
 use crate::transport::video_rx::VideoReceiver;
@@ -32,12 +33,15 @@ pub struct ClientSession {
     pub width: u32,
     pub height: u32,
     shutdown: Arc<AtomicBool>,
+    connection: Option<quinn::Connection>,
     send: Option<quinn::SendStream>,
     input_capture: Option<InputCapture>,
     input_task: Option<tokio::task::JoinHandle<Result<()>>>,
     control_task: Option<tokio::task::JoinHandle<Result<()>>>,
+    datagram_task: Option<tokio::task::JoinHandle<Result<()>>>,
     video_receiver: Option<VideoReceiver>,
     decoder: Option<VideoToolboxDecoder>,
+    cursor_store: Arc<RemoteCursorStore>,
 }
 
 impl ClientSession {
@@ -51,6 +55,10 @@ impl ClientSession {
         self.shutdown.clone()
     }
 
+    pub fn cursor_store(&self) -> Arc<RemoteCursorStore> {
+        self.cursor_store.clone()
+    }
+
     pub async fn shutdown(mut self) -> Result<()> {
         self.shutdown.store(true, Ordering::Relaxed);
 
@@ -61,6 +69,10 @@ impl ClientSession {
         if let Some(mut send) = self.send.take() {
             let _ = send_msg(&mut send, ControlMsg::Goodbye).await;
             let _ = send.finish();
+        }
+
+        if let Some(connection) = self.connection.take() {
+            connection.close(0u32.into(), b"client shutdown");
         }
 
         drop(self.decoder.take());
@@ -82,6 +94,14 @@ impl ClientSession {
             }
         }
 
+        if let Some(datagram_task) = self.datagram_task.take() {
+            match datagram_task.await {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => warn!("cursor datagram task error: {err:#}"),
+                Err(err) => warn!("cursor datagram task join error: {err}"),
+            }
+        }
+
         Ok(())
     }
 }
@@ -95,6 +115,7 @@ pub async fn run_client(server_addr: SocketAddr, options: ClientOptions) -> Resu
         render_rx,
         session.width,
         session.height,
+        session.cursor_store(),
         session.shutdown_signal(),
     );
     let shutdown_result = session.shutdown().await;
@@ -115,6 +136,14 @@ pub async fn connect_client_session(
         .context("QUIC handshake")?;
 
     info!("connected to {}", conn.remote_address());
+    info!(
+        "QUIC datagrams {}",
+        if conn.max_datagram_size().is_some() {
+            "enabled"
+        } else {
+            "unavailable"
+        }
+    );
 
     let (mut send, mut recv) = conn.open_bi().await.context("open control stream")?;
 
@@ -177,6 +206,7 @@ pub async fn connect_client_session(
     );
 
     let shutdown = Arc::new(AtomicBool::new(false));
+    let cursor_store = Arc::new(RemoteCursorStore::default());
 
     let input_stream = conn.open_uni().await.context("open input stream")?;
     let (input_tx, input_rx) = crossbeam_channel::bounded(1024);
@@ -191,12 +221,25 @@ pub async fn connect_client_session(
     let (video_receiver, frame_rx) = VideoReceiver::start(video_port, server_addr.ip())?;
     let (decoder, render_rx) = VideoToolboxDecoder::start(frame_rx)?;
     let control_shutdown = shutdown.clone();
+    let control_cursor_store = cursor_store.clone();
+    let datagram_shutdown = shutdown.clone();
+    let datagram_conn = conn.clone();
+    let datagram_cursor_store = cursor_store.clone();
 
     let control_task = tokio::spawn(async move {
-        let result = control_loop(recv).await;
+        let result = control_loop(recv, control_cursor_store).await;
         control_shutdown.store(true, Ordering::Relaxed);
         if let Err(err) = &result {
             warn!("control loop ended: {err:#}");
+        }
+        result
+    });
+
+    let datagram_task = tokio::spawn(async move {
+        let result = cursor_datagram_loop(datagram_conn, datagram_cursor_store).await;
+        datagram_shutdown.store(true, Ordering::Relaxed);
+        if let Err(err) = &result {
+            warn!("cursor datagram loop ended: {err:#}");
         }
         result
     });
@@ -206,12 +249,15 @@ pub async fn connect_client_session(
         width: session.width,
         height: session.height,
         shutdown,
+        connection: Some(conn),
         send: Some(send),
         input_capture: Some(input_capture),
         input_task: Some(input_task),
         control_task: Some(control_task),
+        datagram_task: Some(datagram_task),
         video_receiver: Some(video_receiver),
         decoder: Some(decoder),
+        cursor_store,
     }))
 }
 
@@ -277,15 +323,26 @@ fn print_displays(displays: &[DisplayInfo]) {
     }
 }
 
-async fn control_loop(mut recv: quinn::RecvStream) -> Result<()> {
+async fn control_loop(
+    mut recv: quinn::RecvStream,
+    cursor_store: Arc<RemoteCursorStore>,
+) -> Result<()> {
     loop {
         match read_control_msg(&mut recv).await {
             Ok(ControlMsg::Heartbeat(t)) => {
                 info!(
-                    "server telemetry: encode={}µs idr_count={}",
-                    t.avg_encode_us, t.idr_count
+                    "server telemetry: capture_wait={}µs capture_convert={}µs encode={}µs send={}µs pipeline={}µs frames={} idr_count={}",
+                    t.avg_capture_wait_us,
+                    t.avg_capture_convert_us,
+                    t.avg_encode_us,
+                    t.avg_send_us,
+                    t.avg_pipeline_us,
+                    t.frame_count,
+                    t.idr_count
                 );
             }
+            Ok(ControlMsg::CursorShape(shape)) => cursor_store.apply_shape(shape),
+            Ok(ControlMsg::CursorState(state)) => cursor_store.apply_state(state),
             Ok(ControlMsg::Goodbye) => {
                 info!("server disconnected");
                 break;
@@ -293,6 +350,29 @@ async fn control_loop(mut recv: quinn::RecvStream) -> Result<()> {
             Ok(other) => warn!("unexpected: {other:?}"),
             Err(err) => {
                 info!("server disconnected: {err:#}");
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn cursor_datagram_loop(
+    conn: quinn::Connection,
+    cursor_store: Arc<RemoteCursorStore>,
+) -> Result<()> {
+    loop {
+        match conn.read_datagram().await {
+            Ok(bytes) => {
+                if let Some(state) = decode_cursor_datagram(&bytes) {
+                    cursor_store.apply_state(state);
+                } else {
+                    warn!("received invalid cursor datagram ({} bytes)", bytes.len());
+                }
+            }
+            Err(err) => {
+                info!("cursor datagram loop stopped: {err}");
                 break;
             }
         }
@@ -354,10 +434,14 @@ fn make_client_endpoint() -> Result<Endpoint> {
         .with_custom_certificate_verifier(Arc::new(AcceptAnyCert))
         .with_no_client_auth();
 
-    let client_config = ClientConfig::new(Arc::new(
+    let mut client_config = ClientConfig::new(Arc::new(
         quinn::crypto::rustls::QuicClientConfig::try_from(crypto)
             .context("build QUIC client config")?,
     ));
+    let mut transport_config = TransportConfig::default();
+    transport_config.datagram_receive_buffer_size(Some(64 * 1024));
+    transport_config.datagram_send_buffer_size(64 * 1024);
+    client_config.transport_config(Arc::new(transport_config));
 
     let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?).context("create client endpoint")?;
     endpoint.set_default_client_config(client_config);
