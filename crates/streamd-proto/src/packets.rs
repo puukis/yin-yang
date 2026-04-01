@@ -1,6 +1,7 @@
 //! On-wire packet definitions for the streamd video and input channels.
 //!
-//! Video frames are split into fragments and sent over raw UDP.
+//! Video frames are split into fragments and delivered as QUIC unreliable
+//! datagrams on the shared control connection (see `VideoTransport`).
 //! Input events travel over a QUIC unidirectional stream.
 
 use serde::{Deserialize, Serialize};
@@ -9,11 +10,12 @@ use serde::{Deserialize, Serialize};
 // Video transport
 // ---------------------------------------------------------------------------
 
-/// Header prepended to every UDP video datagram. 16 bytes.
+/// Header prepended to every video datagram fragment. 18 bytes, fixed layout.
 ///
-/// A single compressed frame may be split into multiple fragments.
-/// Slices allow the decoder to start on the first slice before the second
-/// has been encoded (NVENC sliceMode=3).
+/// A single compressed frame may be split into multiple fragments because QUIC
+/// datagram payloads are bounded by the path MTU. Slices allow the decoder to
+/// start on the first slice while the second is still in flight (NVENC
+/// sliceMode=3).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[repr(C)]
 pub struct VideoPacketHeader {
@@ -32,7 +34,7 @@ pub struct VideoPacketHeader {
 }
 
 impl VideoPacketHeader {
-    pub const SIZE: usize = 18; // serialized via bincode (little-endian)
+    pub const SIZE: usize = 18; // serialized as fixed little-endian bytes
 
     pub fn is_keyframe(&self) -> bool {
         self.flags.contains(VideoFlags::KEY_FRAME)
@@ -51,6 +53,16 @@ bitflags::bitflags! {
         /// This is the final slice in the frame.
         const LAST_SLICE = 0b0000_0010;
     }
+}
+
+/// How the server delivers video frames to the client.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum VideoTransport {
+    /// Video fragments are sent as QUIC unreliable datagrams on the existing
+    /// control connection. No additional port or socket is required on either
+    /// end — the client-initiated QUIC connection handles NAT traversal for
+    /// both directions.
+    QuicDatagram,
 }
 
 // ---------------------------------------------------------------------------
@@ -130,10 +142,8 @@ pub struct SessionAccept {
     pub fps: u8,
     pub width: u32,
     pub height: u32,
-    /// UDP port the server will send video to (on the same address).
-    pub video_udp_port: u16,
-    /// UDP port the client should bind for receiving video.
-    pub client_video_udp_port: u16,
+    /// How the server will deliver video to the client.
+    pub video_transport: VideoTransport,
     /// The display the server selected for this session.
     pub selected_display: DisplayInfo,
 }
@@ -201,11 +211,11 @@ pub struct ServerTelemetry {
     pub avg_capture_convert_us: u32,
     /// Average encode time in microseconds over the last second.
     pub avg_encode_us: u32,
-    /// Average time spent packetising and sending the frame over UDP.
+    /// Average time spent packetising and sending the frame.
     pub avg_send_us: u32,
     /// Average total pipeline time per frame.
     pub avg_pipeline_us: u32,
-    /// Current UDP send queue depth in frames.
+    /// Current send queue depth in frames.
     pub send_queue_frames: u8,
     /// Number of IDR frames sent in the last second.
     pub idr_count: u8,
@@ -239,9 +249,10 @@ pub struct RemoteCursorState {
     pub y: i32,
 }
 
-pub const PROTOCOL_VERSION: u32 = 3;
+/// Protocol version. Both sides must agree or the server rejects the session.
+pub const PROTOCOL_VERSION: u32 = 4;
 
-/// Parse a `VideoPacketHeader` from the first 18 bytes of a UDP datagram.
+/// Parse a `VideoPacketHeader` from the first 18 bytes of a datagram payload.
 /// Returns `(header, remaining_payload)` on success.
 pub fn parse_video_header(buf: &[u8]) -> Option<(VideoPacketHeader, &[u8])> {
     if buf.len() < 18 {
@@ -266,7 +277,9 @@ pub fn parse_video_header(buf: &[u8]) -> Option<(VideoPacketHeader, &[u8])> {
     ))
 }
 
-/// Maximum UDP payload for internet-safe packets.
-pub const MTU_WAN: usize = 1400;
-/// Maximum UDP payload when jumbo frames are available (LAN).
-pub const MTU_LAN: usize = 8900;
+/// Conservative maximum video payload bytes per QUIC datagram on internet paths.
+/// Accounts for QUIC short-header overhead (~28 bytes), the 1-byte datagram
+/// type tag, and the 18-byte video fragment header, leaving room for the
+/// encoded video data. The actual limit is negotiated at runtime via
+/// `Connection::max_datagram_size()`; this constant is the safe fallback.
+pub const MTU_WAN: usize = 1200;
