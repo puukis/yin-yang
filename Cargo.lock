@@ -1537,7 +1537,7 @@ dependencies = [
 
 [[package]]
 name = "streamd-client"
-version = "0.1.0-alpha.1"
+version = "0.2.0-alpha.1"
 dependencies = [
  "anyhow",
  "bincode",
@@ -1567,7 +1567,7 @@ dependencies = [
 
 [[package]]
 name = "streamd-proto"
-version = "0.1.0-alpha.1"
+version = "0.2.0-alpha.1"
 dependencies = [
  "bincode",
  "bitflags 2.11.0",
@@ -1578,7 +1578,7 @@ dependencies = [
 
 [[package]]
 name = "streamd-server"
-version = "0.1.0-alpha.1"
+version = "0.2.0-alpha.1"
 dependencies = [
  "anyhow",
  "bincode",

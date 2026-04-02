@@ -43,7 +43,7 @@ dist plan
 Before tagging a new release:
 
 ```bash
-python scripts/generate_release_notes.py v0.1.0-alpha.2 --previous-tag v0.1.0-alpha.1 --output docs/releases/v0.1.0-alpha.2.md
+python scripts/generate_release_notes.py v0.2.0-alpha.1 --previous-tag v0.1.0-alpha.1 --output docs/releases/v0.2.0-alpha.1.md
 ```
 
 Then edit the generated markdown by hand, commit it, and only tag once the notes read like the release body you actually want published. The workflow uses that file directly.

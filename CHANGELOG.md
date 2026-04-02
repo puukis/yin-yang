@@ -7,10 +7,16 @@ Detailed curated release bodies live under `docs/releases/`.
 
 ## Unreleased
 
+## 0.2.0-alpha.1 - 2026-04-02
+
 ### Added
 
-- XOR parity FEC for QUIC video datagrams so the client can recover one lost fragment per protection group without waiting for a keyframe.
-- Rate-limited client-side `RequestIdr` recovery when frame loss is unrecoverable.
+- Parity-protected QUIC video datagrams with client-side fragment recovery and rate-limited IDR fallback.
+- Client/server telemetry plus adaptive bitrate and FPS controls across the host pipeline and macOS client.
+
+### Changed
+
+- GitHub releases now publish curated markdown from `docs/releases/` instead of generated boilerplate.
 
 ## 0.1.0-alpha.1 - 2026-04-02
 
