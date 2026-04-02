@@ -50,13 +50,6 @@ use anyhow::Context;
 static FIRST_DECODED_FRAME_LOGGED: AtomicBool = AtomicBool::new(false);
 
 impl VideoToolboxDecoder {
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    pub fn start(frame_rx: Receiver<DecodedFrame>) -> Result<(Self, Receiver<RenderFrame>)> {
-        let (render_tx, render_rx) = crossbeam_channel::bounded(1);
-        let decoder = Self::start_with_output(frame_rx, render_tx, render_rx.clone())?;
-        Ok((decoder, render_rx))
-    }
-
     pub fn start_with_output(
         frame_rx: Receiver<DecodedFrame>,
         render_tx: Sender<RenderFrame>,
