@@ -4,6 +4,7 @@
 
 # Local agent / handoff state
 /.claude/
+/.omx/
 /HANDOFF.md
 /AGENTS.md
 

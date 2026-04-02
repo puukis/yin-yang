@@ -58,8 +58,8 @@ The release pipeline produces:
 The release lane is tag-driven:
 
 ```bash
-git tag v0.1.0-alpha.1
-git push origin v0.1.0-alpha.1
+git tag v0.2.0-alpha.1
+git push origin v0.2.0-alpha.1
 ```
 
 Every `v*` tag runs the release workflow and publishes platform-specific artifacts for the host and client binaries. The GitHub release title and body are taken from the matching file in `docs/releases/`.
@@ -241,7 +241,7 @@ dist plan
 To scaffold the next release note body before tagging:
 
 ```bash
-python scripts/generate_release_notes.py v0.1.0-alpha.2 --previous-tag v0.1.0-alpha.1 --output docs/releases/v0.1.0-alpha.2.md
+python scripts/generate_release_notes.py v0.2.0-alpha.1 --previous-tag v0.1.0-alpha.1 --output docs/releases/v0.2.0-alpha.1.md
 ```
 
 ## Security Model
