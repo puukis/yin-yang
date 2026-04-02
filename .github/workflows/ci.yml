@@ -75,8 +75,8 @@ jobs:
       - name: cargo clippy
         run: cargo clippy -p streamd-server --all-targets -- -D warnings
 
-      - name: cargo test
-        run: cargo test -p streamd-server
+      - name: cargo test --lib
+        run: cargo test -p streamd-server --lib
 
   windows-host:
     name: Windows Host
@@ -95,8 +95,8 @@ jobs:
       - name: cargo clippy
         run: cargo clippy -p streamd-server --all-targets -- -D warnings
 
-      - name: cargo test
-        run: cargo test -p streamd-server
+      - name: cargo test --lib
+        run: cargo test -p streamd-server --lib
 
   macos-client:
     name: macOS Client

@@ -13,6 +13,11 @@ keywords = ["quic", "remote-desktop", "macos", "videotoolbox", "metal"]
 display-name = "streamd Client"
 targets = ["x86_64-apple-darwin", "aarch64-apple-darwin"]
 
+[features]
+# The objc `msg_send!` macro still references `feature = "cargo-clippy"`.
+# Declaring it here keeps modern check-cfg + clippy runs from failing on macOS.
+cargo-clippy = []
+
 [dependencies]
 streamd-proto = { workspace = true }
 tokio = { workspace = true }
