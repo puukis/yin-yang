@@ -132,7 +132,7 @@ mod real {
 
     #[cfg(target_os = "windows")]
     use crate::capture::D3d11TextureHandle;
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     use libloading::Library;
     #[cfg(target_os = "linux")]
     use std::os::fd::OwnedFd;
@@ -495,7 +495,7 @@ mod real {
     // Number of pre-allocated input/output buffer pairs.
     const RING_DEPTH: usize = 3;
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     struct NvencLibrary {
         _library: Library,
     }
@@ -514,7 +514,7 @@ mod real {
         _session_device: SessionDevice,
         #[cfg(not(target_os = "windows"))]
         _cuda_ctx: CudaContext,
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         _nvenc_library: NvencLibrary,
         in_bufs: Vec<NV_ENC_INPUT_PTR>,
         out_bufs: Vec<NV_ENC_OUTPUT_PTR>,
@@ -542,17 +542,30 @@ mod real {
         format: NvencInputFormat,
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     fn load_nvenc_api(api: &mut NV_ENCODE_API_FUNCTION_LIST) -> Result<NvencLibrary> {
+        #[cfg(target_os = "windows")]
         type CreateInstanceFn =
             unsafe extern "system" fn(*mut NV_ENCODE_API_FUNCTION_LIST) -> NVENCSTATUS;
+        #[cfg(target_os = "linux")]
+        type CreateInstanceFn =
+            unsafe extern "C" fn(*mut NV_ENCODE_API_FUNCTION_LIST) -> NVENCSTATUS;
 
-        let library = unsafe { Library::new("nvEncodeAPI64.dll") }
-            .context("load nvEncodeAPI64.dll for NVENC")?;
+        #[cfg(target_os = "windows")]
+        let candidates = [std::path::PathBuf::from("nvEncodeAPI64.dll")];
+        #[cfg(target_os = "linux")]
+        let candidates = nvenc_library_candidates();
+
+        let (library, library_name) = load_first_library(&candidates)?;
         let create_instance = unsafe {
             *library
                 .get::<CreateInstanceFn>(b"NvEncodeAPICreateInstance\0")
-                .context("load NvEncodeAPICreateInstance from nvEncodeAPI64.dll")?
+                .with_context(|| {
+                    format!(
+                        "load NvEncodeAPICreateInstance from {}",
+                        library_name.display()
+                    )
+                })?
         };
         let status = unsafe { create_instance(api) };
         if status != NV_ENC_SUCCESS {
@@ -562,13 +575,35 @@ mod real {
         Ok(NvencLibrary { _library: library })
     }
 
-    #[cfg(not(target_os = "windows"))]
-    fn load_nvenc_api(api: &mut NV_ENCODE_API_FUNCTION_LIST) -> Result<()> {
-        let status = unsafe { NvEncodeAPICreateInstance(api) };
-        if status != NV_ENC_SUCCESS {
-            bail!("NvEncodeAPICreateInstance failed: {status:?}");
+    #[cfg(target_os = "linux")]
+    fn nvenc_library_candidates() -> Vec<std::path::PathBuf> {
+        let mut candidates = Vec::new();
+        if let Some(dir) = std::env::var_os("NVENC_LIB_DIR") {
+            let dir = std::path::PathBuf::from(dir);
+            candidates.push(dir.join("libnvidia-encode.so.1"));
+            candidates.push(dir.join("libnvidia-encode.so"));
         }
-        Ok(())
+        candidates.push(std::path::PathBuf::from("libnvidia-encode.so.1"));
+        candidates.push(std::path::PathBuf::from("libnvidia-encode.so"));
+        candidates
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    fn load_first_library(
+        candidates: &[std::path::PathBuf],
+    ) -> Result<(Library, std::path::PathBuf)> {
+        let mut errors = Vec::new();
+        for candidate in candidates {
+            match unsafe { Library::new(candidate) } {
+                Ok(library) => return Ok((library, candidate.clone())),
+                Err(err) => errors.push(format!("{}: {err}", candidate.display())),
+            }
+        }
+
+        bail!(
+            "failed to load NVENC runtime library; tried: {}",
+            errors.join("; ")
+        )
     }
 
     impl NvencEncoder {
@@ -596,10 +631,8 @@ mod real {
                 version: NV_ENCODE_API_FUNCTION_LIST_VER,
                 ..Default::default()
             };
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             let nvenc_library = load_nvenc_api(&mut api)?;
-            #[cfg(not(target_os = "windows"))]
-            load_nvenc_api(&mut api)?;
 
             // Open encoder session on the CUDA device
             let mut open_params = NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS {
@@ -761,7 +794,7 @@ mod real {
                 },
                 #[cfg(not(target_os = "windows"))]
                 _cuda_ctx: device_ctx,
-                #[cfg(target_os = "windows")]
+                #[cfg(any(target_os = "linux", target_os = "windows"))]
                 _nvenc_library: nvenc_library,
                 in_bufs,
                 out_bufs,

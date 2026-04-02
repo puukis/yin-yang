@@ -18,7 +18,6 @@ fn main() {
 
     if let Some(location) = locate_nvenc_header(&target_os) {
         generate_nvenc_bindings(&location.header, Some(location.include_dir.as_path()));
-        emit_nvenc_link_instructions(&target_os);
     } else {
         println!("cargo:warning=NVENC headers were not found for target {target_os}");
         println!(
@@ -82,27 +81,6 @@ fn header_in_include_dir(include_dir: PathBuf) -> Option<NvencHeaderLocation> {
         header: nested,
         include_dir,
     })
-}
-
-fn emit_nvenc_link_instructions(target_os: &str) {
-    if let Some(dir) = env::var_os("NVENC_LIB_DIR") {
-        println!(
-            "cargo:rustc-link-search=native={}",
-            PathBuf::from(dir).display()
-        );
-    }
-
-    match target_os {
-        "linux" => {
-            println!("cargo:rustc-link-search=native=/usr/lib");
-            println!("cargo:rustc-link-search=native=/usr/local/lib");
-            println!("cargo:rustc-link-lib=dylib=nvidia-encode");
-        }
-        "windows" => {
-            // The Windows runtime path uses dynamic loading for NVENC.
-        }
-        _ => {}
-    }
 }
 
 fn generate_nvenc_bindings(header: &Path, include_dir: Option<&Path>) {
