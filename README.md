@@ -176,7 +176,7 @@ flowchart LR
     end
 
     subgraph QUIC["Single QUIC connection"]
-        D["Unreliable datagrams\nvideo + cursor state"]
+        D["Unreliable datagrams\nvideo + FEC parity + cursor state"]
         R["Reliable streams\ncontrol + input + cursor shape"]
     end
 
@@ -198,7 +198,7 @@ flowchart LR
 |---|---|---|
 | Control | bidirectional | QUIC reliable stream |
 | Input | client → host | QUIC unidirectional stream |
-| Video fragments | host → client | QUIC unreliable datagrams |
+| Video fragments + parity | host → client | QUIC unreliable datagrams |
 | Cursor state | host → client | QUIC unreliable datagrams |
 | Cursor shape | host → client | QUIC reliable stream |
 
@@ -207,8 +207,8 @@ flowchart LR
 * Linux capture prefers DMA-BUF + GBM and falls back to SHM
 * Windows capture uses DXGI Desktop Duplication
 * NVENC runs with `sliceMode=3` so slices can be sent before the full frame is complete
-* The client reassembles fragments by `(frame_seq, slice_idx, frag_idx)`
-* Sustained loss triggers `RequestIdr` so the session can recover without reconnecting
+* Video fragments are protected by XOR parity FEC groups so the client can recover one lost fragment per group without a round trip
+* The client reassembles fragments by `(frame_seq, slice_idx, frag_idx)` and requests `RequestIdr` when loss is unrecoverable
 * VideoToolbox decode feeds a zero-copy Metal presentation path on macOS
 
 ### Input path

@@ -7,6 +7,11 @@ Detailed curated release bodies live under `docs/releases/`.
 
 ## Unreleased
 
+### Added
+
+- XOR parity FEC for QUIC video datagrams so the client can recover one lost fragment per protection group without waiting for a keyframe.
+- Rate-limited client-side `RequestIdr` recovery when frame loss is unrecoverable.
+
 ## 0.1.0-alpha.1 - 2026-04-02
 
 ### Added
