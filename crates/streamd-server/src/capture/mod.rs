@@ -27,6 +27,7 @@ pub struct CaptureStats {
     pub convert_us: u32,
 }
 
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 #[derive(Debug, Clone)]
 pub enum CursorEvent {
     Shape(RemoteCursorShape),
@@ -99,7 +100,7 @@ pub mod windows;
 pub fn list_displays() -> Result<Vec<DisplayInfo>> {
     #[cfg(target_os = "linux")]
     {
-        return wayland::list_displays();
+        wayland::list_displays()
     }
 
     #[cfg(target_os = "windows")]

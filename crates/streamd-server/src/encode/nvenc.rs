@@ -470,6 +470,8 @@ mod real {
     const NV_ENC_PIC_PARAMS_VER: u32 = sv(7) | (1u32 << 31);
     const NV_ENC_LOCK_BITSTREAM_VER: u32 = sv(2) | (1u32 << 31);
     const NVENC_INFINITE_GOPLENGTH: u32 = 0xffff_ffff;
+    #[allow(clippy::unnecessary_cast)]
+    const NV_ENC_PIC_FLAG_FORCEIDR_U32: u32 = NV_ENC_PIC_FLAG_FORCEIDR as u32;
 
     const NV_ENC_CODEC_H264_GUID_VALUE: GUID = GUID {
         Data1: 0x6bc8_2762,
@@ -582,16 +584,9 @@ mod real {
             Self::with_d3d11_device(config, device.clone())
         }
 
+        #[cfg(target_os = "windows")]
         pub fn uses_d3d11_input(&self) -> bool {
-            #[cfg(target_os = "windows")]
-            {
-                matches!(&self._session_device, SessionDevice::D3d11 { .. })
-            }
-
-            #[cfg(not(target_os = "windows"))]
-            {
-                false
-            }
+            matches!(&self._session_device, SessionDevice::D3d11 { .. })
         }
 
         /// Initialise the NVENC encoder using an existing CUDA context.
@@ -1031,7 +1026,7 @@ mod real {
                 inputHeight: self.config.height,
                 inputPitch: pitch,
                 encodePicFlags: if force_idr {
-                    NV_ENC_PIC_FLAG_FORCEIDR as u32
+                    NV_ENC_PIC_FLAG_FORCEIDR_U32
                 } else {
                     0
                 },
@@ -1169,7 +1164,7 @@ mod real {
                 inputHeight: self.config.height,
                 inputPitch: self.config.width,
                 encodePicFlags: if force_idr {
-                    NV_ENC_PIC_FLAG_FORCEIDR as u32
+                    NV_ENC_PIC_FLAG_FORCEIDR_U32
                 } else {
                     0
                 },
@@ -1482,6 +1477,7 @@ impl NvencEncoder {
         anyhow::bail!("NVENC not available")
     }
 
+    #[cfg(target_os = "windows")]
     pub fn uses_d3d11_input(&self) -> bool {
         false
     }

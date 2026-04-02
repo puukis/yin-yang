@@ -1,4 +1,5 @@
 //! macOS frame presenter.
+#![cfg_attr(target_os = "macos", allow(unexpected_cfgs))]
 
 use anyhow::{bail, Result};
 use crossbeam_channel::Receiver;
@@ -50,13 +51,13 @@ impl VideoRenderer {
     ) -> Result<()> {
         #[cfg(target_os = "macos")]
         {
-            return render_loop_macos(
+            render_loop_macos(
                 render_rx,
                 initial_width,
                 initial_height,
                 cursor_store,
                 shutdown,
-            );
+            )
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -151,10 +152,10 @@ impl RenderStats {
         self.dropped_frames += dropped_frames;
         self.total_decode_queue_us += frame
             .decode_submitted_at_us
-            .saturating_sub(frame.received_at_us) as u64;
+            .saturating_sub(frame.received_at_us);
         self.total_decode_us += frame
             .decoded_at_us
-            .saturating_sub(frame.decode_submitted_at_us) as u64;
+            .saturating_sub(frame.decode_submitted_at_us);
         self.total_render_queue_us += render_queue_us as u64;
         self.total_present_cpu_us += present_cpu_us as u64;
     }
@@ -594,10 +595,12 @@ fn present_frame(
 ) -> Result<()> {
     let pixel_buffer = &frame.pixel_buffer;
     let pixel_format = pixel_buffer.get_pixel_format();
-    let full_range = match pixel_format {
-        kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange => false,
-        kCVPixelFormatType_420YpCbCr8BiPlanarFullRange => true,
-        other => bail!("unsupported pixel format for Metal presenter: {other:#x}"),
+    let full_range = if pixel_format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange {
+        false
+    } else if pixel_format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange {
+        true
+    } else {
+        bail!("unsupported pixel format for Metal presenter: {pixel_format:#x}");
     };
 
     let y_cv_texture = create_cv_metal_texture(

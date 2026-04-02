@@ -161,7 +161,6 @@ impl VideoToolboxDecoder {
 
                     let mut format_desc: CMVideoFormatDescriptionRef = std::ptr::null_mut();
                     let mut session: VTDecompressionSessionRef = std::ptr::null_mut();
-                    let mut parameter_sets: Option<(Vec<u8>, Vec<u8>)> = None;
                     let mut decode_stats = DecodeSubmitStats::new();
 
                     let callback_tx = Box::new(render_tx.clone());
@@ -179,15 +178,11 @@ impl VideoToolboxDecoder {
                         if frame.is_keyframe {
                             let (new_sps, new_pps) = extract_sps_pps(&frame.data);
                             if let (Some(new_sps), Some(new_pps)) = (new_sps, new_pps) {
-                                parameter_sets = Some((new_sps, new_pps));
-                                let (sps, pps) = parameter_sets
-                                    .as_ref()
-                                    .expect("parameter sets were just stored");
                                 recreate_session(
                                     &mut session,
                                     &mut format_desc,
-                                    sps,
-                                    pps,
+                                    &new_sps,
+                                    &new_pps,
                                     &decoder_spec,
                                     &image_attrs,
                                     callback_tx_ptr,
@@ -210,10 +205,10 @@ impl VideoToolboxDecoder {
                         let data_len = avcc_data.len();
                         let status = unsafe {
                             CMBlockBufferCreateWithMemoryBlock(
-                                kCFAllocatorDefault as *const std::ffi::c_void,
+                                kCFAllocatorDefault,
                                 std::ptr::null(),
                                 data_len,
-                                kCFAllocatorDefault as *const std::ffi::c_void,
+                                kCFAllocatorDefault,
                                 std::ptr::null(),
                                 0,
                                 data_len,
@@ -243,7 +238,7 @@ impl VideoToolboxDecoder {
                         let mut sample_buf: CMSampleBufferRef = std::ptr::null_mut();
                         let status = unsafe {
                             CMSampleBufferCreateReady(
-                                kCFAllocatorDefault as *const std::ffi::c_void,
+                                kCFAllocatorDefault,
                                 block_buf as *const std::ffi::c_void,
                                 format_desc,
                                 1,
@@ -327,6 +322,7 @@ impl Drop for VideoToolboxDecoder {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
 fn recreate_session(
     session: &mut vt::VTDecompressionSessionRef,
     format_desc: &mut vt::CMVideoFormatDescriptionRef,
@@ -449,6 +445,8 @@ fn now_local_us() -> u64 {
 
 #[cfg(target_os = "macos")]
 mod vt {
+    #![allow(improper_ctypes, non_snake_case, non_upper_case_globals)]
+
     use core_foundation::{
         base::{CFRelease, TCFType},
         boolean::CFBoolean,
@@ -464,15 +462,21 @@ mod vt {
         extern "C" fn(*mut c_void, *mut c_void, OSStatus, u32, CVPixelBufferRef, i64, i64);
 
     #[repr(C)]
-    pub struct OpaqueVTDecompressionSession;
+    pub struct OpaqueVTDecompressionSession {
+        _private: [u8; 0],
+    }
     pub type VTDecompressionSessionRef = *mut OpaqueVTDecompressionSession;
 
     #[repr(C)]
-    pub struct OpaqueCMVideoFormatDescription;
+    pub struct OpaqueCMVideoFormatDescription {
+        _private: [u8; 0],
+    }
     pub type CMVideoFormatDescriptionRef = *mut OpaqueCMVideoFormatDescription;
 
     #[repr(C)]
-    pub struct OpaqueCMSampleBuffer;
+    pub struct OpaqueCMSampleBuffer {
+        _private: [u8; 0],
+    }
     pub type CMSampleBufferRef = *mut OpaqueCMSampleBuffer;
 
     pub type CVPixelBufferRef = core_video::pixel_buffer::CVPixelBufferRef;

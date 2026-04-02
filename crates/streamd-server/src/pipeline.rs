@@ -254,6 +254,9 @@ fn run_pipeline_thread(
     telemetry_tx: UnboundedSender<ServerTelemetry>,
     cursor_tx: UnboundedSender<CursorEvent>,
 ) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    let _ = &cursor_tx;
+
     info!(
         "pipeline thread: {codec:?} {width}x{height}@{fps}fps display={} → QUIC datagrams",
         display_id.as_deref().unwrap_or("default")

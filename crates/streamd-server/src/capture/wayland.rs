@@ -451,7 +451,7 @@ impl State {
             bail!("compositor reported an invalid capture size");
         }
 
-        let recreate = self.shm_buf.as_ref().map_or(true, |shm_buf| {
+        let recreate = self.shm_buf.as_ref().is_none_or(|shm_buf| {
             shm_buf.width != self.buf_width
                 || shm_buf.height != self.buf_height
                 || shm_buf.format != format
@@ -491,7 +491,7 @@ impl State {
             bail!("compositor reported an invalid capture size");
         }
 
-        let recreate = self.dmabuf_buf.as_ref().map_or(true, |dmabuf_buf| {
+        let recreate = self.dmabuf_buf.as_ref().is_none_or(|dmabuf_buf| {
             dmabuf_buf.width != self.buf_width
                 || dmabuf_buf.height != self.buf_height
                 || dmabuf_buf.format != selection.format
