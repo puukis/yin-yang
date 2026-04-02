@@ -2,6 +2,12 @@
 name = "streamd-proto"
 version = "0.1.0"
 edition = "2021"
+description = "Shared transport packets, control messages, and input mappings for streamd."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["quic", "remote-desktop", "protocol", "input", "streaming"]
 
 [dependencies]
 bincode = { workspace = true }

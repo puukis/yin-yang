@@ -6,6 +6,11 @@ members = [
 ]
 resolver = "2"
 
+[workspace.package]
+license = "MIT"
+repository = "https://github.com/puukis/streamd"
+homepage = "https://github.com/puukis/streamd"
+
 [workspace.dependencies]
 tokio = { version = "1.50", features = ["full"] }
 quinn = "0.11.9"
@@ -23,3 +28,9 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 streamd-proto = { path = "crates/streamd-proto" }
 bitflags = { version = "2.9", features = ["serde"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

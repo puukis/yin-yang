@@ -1,0 +1,32 @@
+[workspace]
+members = ["cargo:."]
+
+# Config for 'dist'
+[dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.31.0"
+# cargo-dist 0.31.0 emits a broken SBOM upload reference in release.yml.
+# Keep the generated workflow under version control, but don't force exact regeneration.
+allow-dirty = ["ci"]
+# CI backends to support
+ci = "github"
+hosting = ["github"]
+# The installers to generate for each app
+installers = ["shell", "powershell"]
+# The packages to build and publish in this workspace
+packages = ["streamd-server", "streamd-client"]
+# Target platforms to build apps for (Rust target-triple syntax)
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+]
+# Verify the release pipeline on pull requests without publishing artifacts
+pr-run-mode = "plan"
+# Generate checksum sidecars for release archives
+checksum = "sha256"
+# Attach SBOMs to releases for supply-chain visibility
+cargo-cyclonedx = true
+# Enable GitHub artifact attestations for published release assets
+github-attestations = true
