@@ -141,9 +141,11 @@ mod real {
 
     #[cfg(target_os = "linux")]
     mod cuda {
-        use anyhow::{bail, Result};
+        use anyhow::{bail, Context, Result};
+        use libloading::Library;
         use std::ffi::c_void;
         use std::os::fd::{AsRawFd, OwnedFd};
+        use std::sync::Arc;
         use tracing::warn;
 
         type CudaResult = i32;
@@ -151,6 +153,21 @@ mod real {
         type CudaContextRaw = *mut c_void;
         type CudaExternalMemoryRaw = *mut c_void;
         type CudaDevicePtr = u64;
+        type CuInitFn = unsafe extern "C" fn(u32) -> CudaResult;
+        type CuDeviceGetFn = unsafe extern "C" fn(*mut CudaDevice, i32) -> CudaResult;
+        type CuCtxCreateFn =
+            unsafe extern "C" fn(*mut CudaContextRaw, u32, CudaDevice) -> CudaResult;
+        type CuCtxDestroyFn = unsafe extern "C" fn(CudaContextRaw) -> CudaResult;
+        type CuImportExternalMemoryFn = unsafe extern "C" fn(
+            *mut CudaExternalMemoryRaw,
+            *const CudaExternalMemoryHandleDesc,
+        ) -> CudaResult;
+        type CuDestroyExternalMemoryFn = unsafe extern "C" fn(CudaExternalMemoryRaw) -> CudaResult;
+        type CuExternalMemoryGetMappedBufferFn = unsafe extern "C" fn(
+            *mut CudaDevicePtr,
+            CudaExternalMemoryRaw,
+            *const CudaExternalMemoryBufferDesc,
+        ) -> CudaResult;
 
         const CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD: u32 = 1;
 
@@ -184,68 +201,64 @@ mod real {
             reserved: [u32; 16],
         }
 
-        #[link(name = "cuda")]
-        unsafe extern "C" {
-            fn cuInit(flags: u32) -> CudaResult;
-            fn cuDeviceGet(device: *mut CudaDevice, ordinal: i32) -> CudaResult;
-            fn cuCtxCreate_v2(ctx: *mut CudaContextRaw, flags: u32, dev: CudaDevice) -> CudaResult;
-            fn cuCtxDestroy_v2(ctx: CudaContextRaw) -> CudaResult;
-            fn cuImportExternalMemory(
-                ext_mem_out: *mut CudaExternalMemoryRaw,
-                mem_handle_desc: *const CudaExternalMemoryHandleDesc,
-            ) -> CudaResult;
-            fn cuDestroyExternalMemory(ext_mem: CudaExternalMemoryRaw) -> CudaResult;
-            fn cuExternalMemoryGetMappedBuffer(
-                dev_ptr: *mut CudaDevicePtr,
-                ext_mem: CudaExternalMemoryRaw,
-                buffer_desc: *const CudaExternalMemoryBufferDesc,
-            ) -> CudaResult;
+        struct DriverApi {
+            _library: Library,
+            cu_init: CuInitFn,
+            cu_device_get: CuDeviceGetFn,
+            cu_ctx_create: CuCtxCreateFn,
+            cu_ctx_destroy: CuCtxDestroyFn,
+            cu_import_external_memory: CuImportExternalMemoryFn,
+            cu_destroy_external_memory: CuDestroyExternalMemoryFn,
+            cu_external_memory_get_mapped_buffer: CuExternalMemoryGetMappedBufferFn,
         }
 
         pub struct CudaContext {
             raw: CudaContextRaw,
+            driver: Arc<DriverApi>,
         }
 
         pub struct ExternalMemory {
             raw: CudaExternalMemoryRaw,
+            driver: Arc<DriverApi>,
         }
 
         impl CudaContext {
             pub fn create_default() -> Result<Self> {
                 unsafe {
-                    let status = cuInit(0);
+                    let driver = Arc::new(load_driver_api()?);
+
+                    let status = (driver.cu_init)(0);
                     if status != 0 {
                         bail!("cuInit failed: {status}");
                     }
 
                     let mut device = 0;
-                    let status = cuDeviceGet(&mut device, 0);
+                    let status = (driver.cu_device_get)(&mut device, 0);
                     if status != 0 {
                         bail!("cuDeviceGet(0) failed: {status}");
                     }
 
                     let mut raw = std::ptr::null_mut();
-                    let status = cuCtxCreate_v2(&mut raw, 0, device);
+                    let status = (driver.cu_ctx_create)(&mut raw, 0, device);
                     if status != 0 {
                         bail!("cuCtxCreate_v2 failed: {status}");
                     }
 
-                    Ok(Self { raw })
+                    Ok(Self { raw, driver })
                 }
             }
 
             pub fn as_ptr(&self) -> *mut c_void {
                 self.raw
             }
-        }
 
-        impl ExternalMemory {
             pub fn import_dmabuf(
+                &self,
                 fd: OwnedFd,
                 allocation_size: u64,
                 offset: u64,
                 mapping_size: u64,
-            ) -> Result<(Self, u64)> {
+            ) -> Result<(ExternalMemory, u64)> {
                 unsafe {
                     let desc = CudaExternalMemoryHandleDesc {
                         r#type: CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD,
@@ -256,7 +269,7 @@ mod real {
                     };
 
                     let mut raw = std::ptr::null_mut();
-                    let status = cuImportExternalMemory(&mut raw, &desc);
+                    let status = (self.driver.cu_import_external_memory)(&mut raw, &desc);
                     drop(fd);
                     if status != 0 {
                         bail!("cuImportExternalMemory failed: {status}");
@@ -269,16 +282,117 @@ mod real {
                         reserved: [0; 16],
                     };
                     let mut mapped_ptr = 0;
-                    let status =
-                        cuExternalMemoryGetMappedBuffer(&mut mapped_ptr, raw, &buffer_desc);
+                    let status = (self.driver.cu_external_memory_get_mapped_buffer)(
+                        &mut mapped_ptr,
+                        raw,
+                        &buffer_desc,
+                    );
                     if status != 0 {
-                        let _ = cuDestroyExternalMemory(raw);
+                        let _ = (self.driver.cu_destroy_external_memory)(raw);
                         bail!("cuExternalMemoryGetMappedBuffer failed: {status}");
                     }
 
-                    Ok((Self { raw }, mapped_ptr))
+                    Ok((
+                        ExternalMemory {
+                            raw,
+                            driver: self.driver.clone(),
+                        },
+                        mapped_ptr,
+                    ))
                 }
             }
+        }
+
+        fn load_driver_api() -> Result<DriverApi> {
+            let candidates = [
+                std::path::PathBuf::from("libcuda.so.1"),
+                std::path::PathBuf::from("libcuda.so"),
+            ];
+            let (library, library_name) =
+                load_first_library(&candidates).context("load CUDA runtime library for NVENC")?;
+
+            let cu_init = unsafe {
+                *library
+                    .get::<CuInitFn>(b"cuInit\0")
+                    .with_context(|| format!("load cuInit from {}", library_name.display()))?
+            };
+            let cu_device_get = unsafe {
+                *library
+                    .get::<CuDeviceGetFn>(b"cuDeviceGet\0")
+                    .with_context(|| format!("load cuDeviceGet from {}", library_name.display()))?
+            };
+            let cu_ctx_create = unsafe {
+                *library
+                    .get::<CuCtxCreateFn>(b"cuCtxCreate_v2\0")
+                    .with_context(|| {
+                        format!("load cuCtxCreate_v2 from {}", library_name.display())
+                    })?
+            };
+            let cu_ctx_destroy = unsafe {
+                *library
+                    .get::<CuCtxDestroyFn>(b"cuCtxDestroy_v2\0")
+                    .with_context(|| {
+                        format!("load cuCtxDestroy_v2 from {}", library_name.display())
+                    })?
+            };
+            let cu_import_external_memory = unsafe {
+                *library
+                    .get::<CuImportExternalMemoryFn>(b"cuImportExternalMemory\0")
+                    .with_context(|| {
+                        format!(
+                            "load cuImportExternalMemory from {}",
+                            library_name.display()
+                        )
+                    })?
+            };
+            let cu_destroy_external_memory = unsafe {
+                *library
+                    .get::<CuDestroyExternalMemoryFn>(b"cuDestroyExternalMemory\0")
+                    .with_context(|| {
+                        format!(
+                            "load cuDestroyExternalMemory from {}",
+                            library_name.display()
+                        )
+                    })?
+            };
+            let cu_external_memory_get_mapped_buffer = unsafe {
+                *library
+                    .get::<CuExternalMemoryGetMappedBufferFn>(b"cuExternalMemoryGetMappedBuffer\0")
+                    .with_context(|| {
+                        format!(
+                            "load cuExternalMemoryGetMappedBuffer from {}",
+                            library_name.display()
+                        )
+                    })?
+            };
+
+            Ok(DriverApi {
+                _library: library,
+                cu_init,
+                cu_device_get,
+                cu_ctx_create,
+                cu_ctx_destroy,
+                cu_import_external_memory,
+                cu_destroy_external_memory,
+                cu_external_memory_get_mapped_buffer,
+            })
+        }
+
+        fn load_first_library(
+            candidates: &[std::path::PathBuf],
+        ) -> Result<(Library, std::path::PathBuf)> {
+            let mut errors = Vec::new();
+            for candidate in candidates {
+                match unsafe { Library::new(candidate) } {
+                    Ok(library) => return Ok((library, candidate.clone())),
+                    Err(err) => errors.push(format!("{}: {err}", candidate.display())),
+                }
+            }
+
+            bail!(
+                "failed to load CUDA runtime library; tried: {}",
+                errors.join("; ")
+            )
         }
 
         impl Drop for CudaContext {
@@ -288,7 +402,7 @@ mod real {
                 }
 
                 unsafe {
-                    let status = cuCtxDestroy_v2(self.raw);
+                    let status = (self.driver.cu_ctx_destroy)(self.raw);
                     if status != 0 {
                         warn!("cuCtxDestroy_v2 failed: {status}");
                     }
@@ -303,7 +417,7 @@ mod real {
                 }
 
                 unsafe {
-                    let status = cuDestroyExternalMemory(self.raw);
+                    let status = (self.driver.cu_destroy_external_memory)(self.raw);
                     if status != 0 {
                         warn!("cuDestroyExternalMemory failed: {status}");
                     }
@@ -990,9 +1104,10 @@ mod real {
                 return Ok(());
             }
 
-            let (external_memory, cuda_ptr) =
-                ExternalMemory::import_dmabuf(fd, allocation_size, offset, mapping_size)
-                    .context("import DMA-BUF into CUDA")?;
+            let (external_memory, cuda_ptr) = self
+                ._cuda_ctx
+                .import_dmabuf(fd, allocation_size, offset, mapping_size)
+                .context("import DMA-BUF into CUDA")?;
             let registered = self
                 .register_cuda_resource(cuda_ptr, pitch, NvencInputFormat::Argb)
                 .context("register imported DMA-BUF with NVENC")?;

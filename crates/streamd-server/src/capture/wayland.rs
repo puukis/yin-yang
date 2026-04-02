@@ -5,6 +5,7 @@
 
 use anyhow::{bail, Context, Result};
 use crossbeam_channel::Sender;
+use libloading::Library;
 use nix::sys::memfd::{memfd_create, MemFdCreateFlag};
 use nix::sys::mman::{mmap, munmap, MapFlags, ProtFlags};
 use nix::unistd::ftruncate;
@@ -14,7 +15,10 @@ use std::num::NonZeroUsize;
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::MetadataExt;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::{
+    atomic::{AtomicU64, Ordering as AtomicOrdering},
+    Arc,
+};
 use streamd_proto::packets::DisplayInfo;
 use tracing::{debug, info, warn};
 use wayland_client::{
@@ -657,6 +661,7 @@ impl Drop for ShmBuffer {
 }
 
 struct DmabufBuffer {
+    api: Arc<GbmApi>,
     id: u64,
     gbm_device: NonNull<GbmDevice>,
     bo: NonNull<GbmBo>,
@@ -673,7 +678,7 @@ struct DmabufBuffer {
 
 impl DmabufBuffer {
     fn export_fd(&self) -> Result<OwnedFd> {
-        let fd = unsafe { gbm_bo_get_fd(self.bo.as_ptr()) };
+        let fd = unsafe { (self.api.gbm_bo_get_fd)(self.bo.as_ptr()) };
         if fd < 0 {
             bail!("gbm_bo_get_fd failed for DMA-BUF capture buffer");
         }
@@ -686,8 +691,8 @@ impl Drop for DmabufBuffer {
     fn drop(&mut self) {
         self.buffer.destroy();
         unsafe {
-            gbm_bo_destroy(self.bo.as_ptr());
-            gbm_device_destroy(self.gbm_device.as_ptr());
+            (self.api.gbm_bo_destroy)(self.bo.as_ptr());
+            (self.api.gbm_device_destroy)(self.gbm_device.as_ptr());
         }
     }
 }
@@ -702,33 +707,142 @@ struct GbmBo {
     _private: [u8; 0],
 }
 
-#[link(name = "gbm")]
-unsafe extern "C" {
-    fn gbm_create_device(fd: i32) -> *mut GbmDevice;
-    fn gbm_device_destroy(device: *mut GbmDevice);
-    fn gbm_device_is_format_supported(device: *mut GbmDevice, format: u32, flags: u32) -> i32;
-    fn gbm_bo_create(
-        device: *mut GbmDevice,
-        width: u32,
-        height: u32,
-        format: u32,
-        flags: u32,
-    ) -> *mut GbmBo;
-    fn gbm_bo_create_with_modifiers2(
-        device: *mut GbmDevice,
-        width: u32,
-        height: u32,
-        format: u32,
-        modifiers: *const u64,
-        count: u32,
-        flags: u32,
-    ) -> *mut GbmBo;
-    fn gbm_bo_get_stride(bo: *mut GbmBo) -> u32;
-    fn gbm_bo_get_offset(bo: *mut GbmBo, plane: i32) -> u32;
-    fn gbm_bo_get_modifier(bo: *mut GbmBo) -> u64;
-    fn gbm_bo_get_plane_count(bo: *mut GbmBo) -> i32;
-    fn gbm_bo_get_fd(bo: *mut GbmBo) -> i32;
-    fn gbm_bo_destroy(bo: *mut GbmBo);
+type GbmCreateDeviceFn = unsafe extern "C" fn(i32) -> *mut GbmDevice;
+type GbmDeviceDestroyFn = unsafe extern "C" fn(*mut GbmDevice);
+type GbmDeviceIsFormatSupportedFn = unsafe extern "C" fn(*mut GbmDevice, u32, u32) -> i32;
+type GbmBoCreateFn = unsafe extern "C" fn(*mut GbmDevice, u32, u32, u32, u32) -> *mut GbmBo;
+type GbmBoCreateWithModifiers2Fn =
+    unsafe extern "C" fn(*mut GbmDevice, u32, u32, u32, *const u64, u32, u32) -> *mut GbmBo;
+type GbmBoGetStrideFn = unsafe extern "C" fn(*mut GbmBo) -> u32;
+type GbmBoGetOffsetFn = unsafe extern "C" fn(*mut GbmBo, i32) -> u32;
+type GbmBoGetModifierFn = unsafe extern "C" fn(*mut GbmBo) -> u64;
+type GbmBoGetPlaneCountFn = unsafe extern "C" fn(*mut GbmBo) -> i32;
+type GbmBoGetFdFn = unsafe extern "C" fn(*mut GbmBo) -> i32;
+type GbmBoDestroyFn = unsafe extern "C" fn(*mut GbmBo);
+
+struct GbmApi {
+    _library: Library,
+    gbm_create_device: GbmCreateDeviceFn,
+    gbm_device_destroy: GbmDeviceDestroyFn,
+    gbm_device_is_format_supported: GbmDeviceIsFormatSupportedFn,
+    gbm_bo_create: GbmBoCreateFn,
+    gbm_bo_create_with_modifiers2: GbmBoCreateWithModifiers2Fn,
+    gbm_bo_get_stride: GbmBoGetStrideFn,
+    gbm_bo_get_offset: GbmBoGetOffsetFn,
+    gbm_bo_get_modifier: GbmBoGetModifierFn,
+    gbm_bo_get_plane_count: GbmBoGetPlaneCountFn,
+    gbm_bo_get_fd: GbmBoGetFdFn,
+    gbm_bo_destroy: GbmBoDestroyFn,
+}
+
+fn load_gbm_api() -> Result<Arc<GbmApi>> {
+    let candidates = [
+        std::path::PathBuf::from("libgbm.so.1"),
+        std::path::PathBuf::from("libgbm.so"),
+    ];
+    let (library, library_name) =
+        load_first_library(&candidates).context("load GBM runtime library")?;
+
+    let gbm_create_device = unsafe {
+        *library
+            .get::<GbmCreateDeviceFn>(b"gbm_create_device\0")
+            .with_context(|| format!("load gbm_create_device from {}", library_name.display()))?
+    };
+    let gbm_device_destroy = unsafe {
+        *library
+            .get::<GbmDeviceDestroyFn>(b"gbm_device_destroy\0")
+            .with_context(|| format!("load gbm_device_destroy from {}", library_name.display()))?
+    };
+    let gbm_device_is_format_supported = unsafe {
+        *library
+            .get::<GbmDeviceIsFormatSupportedFn>(b"gbm_device_is_format_supported\0")
+            .with_context(|| {
+                format!(
+                    "load gbm_device_is_format_supported from {}",
+                    library_name.display()
+                )
+            })?
+    };
+    let gbm_bo_create = unsafe {
+        *library
+            .get::<GbmBoCreateFn>(b"gbm_bo_create\0")
+            .with_context(|| format!("load gbm_bo_create from {}", library_name.display()))?
+    };
+    let gbm_bo_create_with_modifiers2 = unsafe {
+        *library
+            .get::<GbmBoCreateWithModifiers2Fn>(b"gbm_bo_create_with_modifiers2\0")
+            .with_context(|| {
+                format!(
+                    "load gbm_bo_create_with_modifiers2 from {}",
+                    library_name.display()
+                )
+            })?
+    };
+    let gbm_bo_get_stride = unsafe {
+        *library
+            .get::<GbmBoGetStrideFn>(b"gbm_bo_get_stride\0")
+            .with_context(|| format!("load gbm_bo_get_stride from {}", library_name.display()))?
+    };
+    let gbm_bo_get_offset = unsafe {
+        *library
+            .get::<GbmBoGetOffsetFn>(b"gbm_bo_get_offset\0")
+            .with_context(|| format!("load gbm_bo_get_offset from {}", library_name.display()))?
+    };
+    let gbm_bo_get_modifier = unsafe {
+        *library
+            .get::<GbmBoGetModifierFn>(b"gbm_bo_get_modifier\0")
+            .with_context(|| format!("load gbm_bo_get_modifier from {}", library_name.display()))?
+    };
+    let gbm_bo_get_plane_count = unsafe {
+        *library
+            .get::<GbmBoGetPlaneCountFn>(b"gbm_bo_get_plane_count\0")
+            .with_context(|| {
+                format!(
+                    "load gbm_bo_get_plane_count from {}",
+                    library_name.display()
+                )
+            })?
+    };
+    let gbm_bo_get_fd = unsafe {
+        *library
+            .get::<GbmBoGetFdFn>(b"gbm_bo_get_fd\0")
+            .with_context(|| format!("load gbm_bo_get_fd from {}", library_name.display()))?
+    };
+    let gbm_bo_destroy = unsafe {
+        *library
+            .get::<GbmBoDestroyFn>(b"gbm_bo_destroy\0")
+            .with_context(|| format!("load gbm_bo_destroy from {}", library_name.display()))?
+    };
+
+    Ok(Arc::new(GbmApi {
+        _library: library,
+        gbm_create_device,
+        gbm_device_destroy,
+        gbm_device_is_format_supported,
+        gbm_bo_create,
+        gbm_bo_create_with_modifiers2,
+        gbm_bo_get_stride,
+        gbm_bo_get_offset,
+        gbm_bo_get_modifier,
+        gbm_bo_get_plane_count,
+        gbm_bo_get_fd,
+        gbm_bo_destroy,
+    }))
+}
+
+fn load_first_library(candidates: &[std::path::PathBuf]) -> Result<(Library, std::path::PathBuf)> {
+    let mut errors = Vec::new();
+    for candidate in candidates {
+        match unsafe { Library::new(candidate) } {
+            Ok(library) => return Ok((library, candidate.clone())),
+            Err(err) => errors.push(format!("{}: {err}", candidate.display())),
+        }
+    }
+
+    bail!(
+        "failed to load GBM runtime library; tried: {}",
+        errors.join("; ")
+    )
 }
 
 fn alloc_shm_buffer(
@@ -796,20 +910,21 @@ fn alloc_dmabuf_buffer(
     selection: DmabufFormatSelection,
     device_id: u64,
 ) -> Result<DmabufBuffer> {
+    let api = load_gbm_api()?;
     let drm_node = open_drm_node_for_device(device_id)?;
-    let gbm_device = unsafe { gbm_create_device(drm_node.as_raw_fd()) };
+    let gbm_device = unsafe { (api.gbm_create_device)(drm_node.as_raw_fd()) };
     let gbm_device = NonNull::new(gbm_device).context("gbm_create_device returned null")?;
 
     let gbm_flags = GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR;
     let drm_format = selection.format.drm_format();
     let supported =
-        unsafe { gbm_device_is_format_supported(gbm_device.as_ptr(), drm_format, gbm_flags) };
+        unsafe { (api.gbm_device_is_format_supported)(gbm_device.as_ptr(), drm_format, gbm_flags) };
     if supported == 0 {
         bail!("GBM device does not support format {drm_format:#x} with flags {gbm_flags:#x}");
     }
 
     let mut bo = unsafe {
-        gbm_bo_create_with_modifiers2(
+        (api.gbm_bo_create_with_modifiers2)(
             gbm_device.as_ptr(),
             width,
             height,
@@ -820,24 +935,26 @@ fn alloc_dmabuf_buffer(
         )
     };
     if bo.is_null() && selection.modifier == DRM_FORMAT_MOD_LINEAR {
-        bo = unsafe { gbm_bo_create(gbm_device.as_ptr(), width, height, drm_format, gbm_flags) };
+        bo = unsafe {
+            (api.gbm_bo_create)(gbm_device.as_ptr(), width, height, drm_format, gbm_flags)
+        };
     }
     let bo = NonNull::new(bo).context("failed to allocate GBM DMA-BUF buffer")?;
 
-    let plane_count = unsafe { gbm_bo_get_plane_count(bo.as_ptr()) };
+    let plane_count = unsafe { (api.gbm_bo_get_plane_count)(bo.as_ptr()) };
     if plane_count != 1 {
         bail!("only single-plane DMA-BUF buffers are supported, got {plane_count}");
     }
 
-    let pitch = unsafe { gbm_bo_get_stride(bo.as_ptr()) };
-    let offset = unsafe { gbm_bo_get_offset(bo.as_ptr(), 0) };
-    let modifier = unsafe { gbm_bo_get_modifier(bo.as_ptr()) };
+    let pitch = unsafe { (api.gbm_bo_get_stride)(bo.as_ptr()) };
+    let offset = unsafe { (api.gbm_bo_get_offset)(bo.as_ptr(), 0) };
+    let modifier = unsafe { (api.gbm_bo_get_modifier)(bo.as_ptr()) };
     let allocation_size = u64::from(offset)
         .checked_add(u64::from(pitch).saturating_mul(u64::from(height)))
         .context("DMA-BUF allocation size overflow")?;
 
     let plane_fd = {
-        let fd = unsafe { gbm_bo_get_fd(bo.as_ptr()) };
+        let fd = unsafe { (api.gbm_bo_get_fd)(bo.as_ptr()) };
         if fd < 0 {
             bail!("gbm_bo_get_fd failed while creating wl_buffer for DMA-BUF capture");
         }
@@ -865,6 +982,7 @@ fn alloc_dmabuf_buffer(
     drop(plane_fd);
 
     Ok(DmabufBuffer {
+        api,
         id: NEXT_DMABUF_BUFFER_ID.fetch_add(1, AtomicOrdering::Relaxed),
         gbm_device,
         bo,
