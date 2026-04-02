@@ -6,9 +6,12 @@ The format follows Keep a Changelog and the project uses SemVer-style tags for G
 
 ## Unreleased
 
+## 0.1.0-alpha.1 - 2026-04-02
+
 ### Added
 
+- Initial public alpha release.
 - QUIC datagram video transport with control, input, and cursor channels over a single connection.
-- Linux Wayland and Windows server paths with NVENC-backed video encode.
+- Linux Wayland and Windows host paths with NVENC-backed video encode.
 - macOS client path with VideoToolbox decode, Metal presentation, and HID-based input forwarding.
 - GitHub release automation, prerelease packaging, and repository health files for easier adoption.
