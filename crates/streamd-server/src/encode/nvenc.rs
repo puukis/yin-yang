@@ -1273,7 +1273,7 @@ mod real {
                 inputHeight: self.config.height,
                 inputPitch: lock.pitch,
                 encodePicFlags: if force_idr {
-                    NV_ENC_PIC_FLAG_FORCEIDR as u32
+                    NV_ENC_PIC_FLAG_FORCEIDR_U32
                 } else {
                     0
                 },

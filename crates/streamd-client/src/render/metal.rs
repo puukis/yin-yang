@@ -555,6 +555,7 @@ unsafe fn pump_app_events(app: cocoa::base::id) {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(unexpected_cfgs)]
 unsafe fn sync_layer_frame(content_view: cocoa::base::id, layer: &MetalLayerRef) {
     use cocoa::foundation::NSRect;
 
@@ -563,6 +564,7 @@ unsafe fn sync_layer_frame(content_view: cocoa::base::id, layer: &MetalLayerRef)
 }
 
 #[cfg(target_os = "macos")]
+#[allow(unexpected_cfgs)]
 unsafe fn resize_window_and_layer(
     window: cocoa::base::id,
     content_view: cocoa::base::id,
