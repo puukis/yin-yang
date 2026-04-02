@@ -5,6 +5,7 @@
 # Local agent / handoff state
 /.claude/
 /HANDOFF.md
+/AGENTS.md
 
 # Editor and IDE settings
 /.idea/
