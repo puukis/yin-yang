@@ -786,10 +786,7 @@ fn cursor_position_relative_to_display(
     // the cursor bitmap in desktop coordinates — not the hotspot/tip position.
     // Subtracting hot_x/hot_y here would double-offset the bitmap upper-left
     // and render it a few pixels in the wrong direction.
-    (
-        cursor.x - display_origin.0,
-        cursor.y - display_origin.1,
-    )
+    (cursor.x - display_origin.0, cursor.y - display_origin.1)
 }
 
 fn ensure_staging_texture(
