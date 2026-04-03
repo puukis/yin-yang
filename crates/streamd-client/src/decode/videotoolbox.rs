@@ -192,7 +192,7 @@ impl VideoToolboxDecoder {
                         if frame.is_keyframe {
                             let (new_sps, new_pps) = extract_sps_pps(&frame.data);
                             if let (Some(new_sps), Some(new_pps)) = (new_sps, new_pps) {
-                                recreate_session(
+                                update_or_recreate_session(
                                     &mut session,
                                     &mut format_desc,
                                     &new_sps,
@@ -332,7 +332,7 @@ impl Drop for VideoToolboxDecoder {
 
 #[cfg(target_os = "macos")]
 #[allow(clippy::too_many_arguments)]
-fn recreate_session(
+fn update_or_recreate_session(
     session: &mut vt::VTDecompressionSessionRef,
     format_desc: &mut vt::CMVideoFormatDescriptionRef,
     sps: &[u8],
@@ -345,10 +345,8 @@ fn recreate_session(
     use tracing::{error, info, warn};
     use vt::*;
 
-    unsafe {
-        destroy_session(session, format_desc);
-    }
-
+    // Build the candidate format description from the new SPS/PPS.
+    let mut new_format_desc: CMVideoFormatDescriptionRef = std::ptr::null_mut();
     let param_sets: [*const u8; 2] = [sps.as_ptr(), pps.as_ptr()];
     let param_sizes: [usize; 2] = [sps.len(), pps.len()];
     let status = unsafe {
@@ -358,13 +356,39 @@ fn recreate_session(
             param_sets.as_ptr(),
             param_sizes.as_ptr(),
             4,
-            format_desc,
+            &mut new_format_desc,
         )
     };
     if status != noErr {
         error!("CMVideoFormatDescriptionCreateFromH264ParameterSets: {status}");
         return;
     }
+
+    // If a session already exists, ask VideoToolbox whether it can decode the
+    // new format without a full teardown. With repeatSPSPPS=1 and a fixed
+    // resolution (the common case) this returns true on every IDR caused by
+    // packet loss, so we simply swap the format description and keep the
+    // existing session — eliminating the freeze that would otherwise occur.
+    if !session.is_null() {
+        let can_accept = unsafe {
+            VTDecompressionSessionCanAcceptFormatDescription(*session, new_format_desc) != 0
+        };
+        if can_accept {
+            unsafe {
+                cf_release(*format_desc as *const std::ffi::c_void);
+            }
+            *format_desc = new_format_desc;
+            return;
+        }
+    }
+
+    // Format actually changed (or no session exists yet): full teardown and
+    // recreation. destroy_session is a no-op when the pointers are already null.
+    let is_initial = session.is_null();
+    unsafe {
+        destroy_session(session, format_desc);
+    }
+    *format_desc = new_format_desc;
 
     let callback = VTDecompressionOutputCallbackRecord {
         decompressionOutputCallback: Some(decode_callback),
@@ -389,7 +413,11 @@ fn recreate_session(
     if status != noErr {
         warn!("VTSessionSetProperty(RealTime): {status}");
     }
-    info!("VideoToolbox session ready from keyframe");
+    if is_initial {
+        info!("VideoToolbox session ready from keyframe");
+    } else {
+        info!("VideoToolbox session recreated (format changed)");
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -526,6 +554,12 @@ mod vt {
         pub fn VTDecompressionSessionWaitForAsynchronousFrames(
             session: VTDecompressionSessionRef,
         ) -> OSStatus;
+        /// Returns non-zero if the existing session can decode frames described
+        /// by `newFormatDescription` without being torn down and recreated.
+        pub fn VTDecompressionSessionCanAcceptFormatDescription(
+            session: VTDecompressionSessionRef,
+            newFormatDescription: CMVideoFormatDescriptionRef,
+        ) -> u8;
         pub fn VTSessionSetProperty(
             session: *mut c_void,
             propertyKey: *const c_void,
