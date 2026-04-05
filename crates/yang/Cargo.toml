@@ -46,4 +46,13 @@ metal = "0.33.0"
 objc = "0.2"
 rdev = "0.5.3"
 
+[lib]
+name = "yang"
+path = "src/lib.rs"
+crate-type = ["staticlib", "lib"]
+
+[[bin]]
+name = "yang"
+path = "src/main.rs"
+
 [build-dependencies]

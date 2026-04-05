@@ -230,6 +230,17 @@ pub async fn run_client(server_addr: SocketAddr, options: ClientOptions) -> Resu
     render_result.and(shutdown_result)
 }
 
+/// List displays available on the server without starting a session.
+pub async fn list_displays(server_addr: SocketAddr) -> Result<Vec<DisplayInfo>> {
+    let endpoint = make_client_endpoint()?;
+    let conn = connect_to_server(&endpoint, server_addr).await?;
+    let (mut send, _recv, displays) = open_control_and_query_displays(&conn).await?;
+    let _ = send_msg(&mut send, ControlMsg::Goodbye).await;
+    let _ = send.finish();
+    conn.close(0u32.into(), b"list displays");
+    Ok(displays)
+}
+
 pub async fn connect_client_session(
     server_addr: SocketAddr,
     options: ClientOptions,
@@ -580,6 +591,7 @@ async fn datagram_dispatch_loop(
 
         match bytes.first() {
             Some(&DATAGRAM_TAG_VIDEO) => {
+                telemetry.record_bytes_received(bytes.len());
                 let outcome = reassembler.push_datagram(&bytes[1..]);
                 if let Some(loss) = outcome.loss {
                     telemetry.record_reassembly(
@@ -634,7 +646,7 @@ async fn control_send_loop(
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                send_msg(&mut send, ControlMsg::ClientTelemetry(telemetry.drain())).await?;
+                send_msg(&mut send, ControlMsg::ClientTelemetry(telemetry.drain().proto)).await?;
             }
             maybe_msg = control_rx.recv() => {
                 let Some(msg) = maybe_msg else {
