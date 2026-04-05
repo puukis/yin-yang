@@ -307,6 +307,12 @@ pub struct VideoFrameReassembler {
     max_seen_frame_seq: Option<u32>,
 }
 
+impl Default for VideoFrameReassembler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VideoFrameReassembler {
     pub fn new() -> Self {
         Self {

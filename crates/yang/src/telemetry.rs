@@ -4,6 +4,13 @@ use yin_yang_proto::packets::ClientTelemetry;
 
 pub type SharedClientTelemetry = Arc<ClientTelemetryAccumulator>;
 
+/// Output of [`ClientTelemetryAccumulator::drain`].
+pub struct DrainedTelemetry {
+    pub proto: ClientTelemetry,
+    /// Raw bytes received in the last drain window (video datagrams only).
+    pub received_bytes: u64,
+}
+
 #[derive(Default)]
 pub struct ClientTelemetryAccumulator {
     inner: Mutex<ClientTelemetryState>,
@@ -18,11 +25,17 @@ struct ClientTelemetryState {
     render_dropped_frames: u32,
     total_decode_queue_us: u64,
     total_render_queue_us: u64,
+    received_bytes: u64,
 }
 
 impl ClientTelemetryAccumulator {
     pub fn shared() -> SharedClientTelemetry {
         Arc::new(Self::default())
+    }
+
+    pub fn record_bytes_received(&self, bytes: usize) {
+        let mut inner = self.inner.lock().expect("client telemetry mutex poisoned");
+        inner.received_bytes = inner.received_bytes.saturating_add(bytes as u64);
     }
 
     pub fn record_reassembly(
@@ -52,17 +65,20 @@ impl ClientTelemetryAccumulator {
         inner.total_render_queue_us += render_queue_us as u64;
     }
 
-    pub fn drain(&self) -> ClientTelemetry {
+    pub fn drain(&self) -> DrainedTelemetry {
         let mut inner = self.inner.lock().expect("client telemetry mutex poisoned");
         let presented = inner.presented_frames;
-        let telemetry = ClientTelemetry {
-            unrecoverable_frames: inner.unrecoverable_frames,
-            recovered_frames: inner.recovered_frames,
-            recovered_fragments: inner.recovered_fragments,
-            presented_frames: presented,
-            render_dropped_frames: inner.render_dropped_frames,
-            avg_decode_queue_us: average(inner.total_decode_queue_us, presented),
-            avg_render_queue_us: average(inner.total_render_queue_us, presented),
+        let telemetry = DrainedTelemetry {
+            proto: ClientTelemetry {
+                unrecoverable_frames: inner.unrecoverable_frames,
+                recovered_frames: inner.recovered_frames,
+                recovered_fragments: inner.recovered_fragments,
+                presented_frames: presented,
+                render_dropped_frames: inner.render_dropped_frames,
+                avg_decode_queue_us: average(inner.total_decode_queue_us, presented),
+                avg_render_queue_us: average(inner.total_render_queue_us, presented),
+            },
+            received_bytes: inner.received_bytes,
         };
         *inner = ClientTelemetryState::default();
         telemetry
@@ -89,16 +105,16 @@ mod tests {
         telemetry.record_render(60, 40, 0);
 
         let sample = telemetry.drain();
-        assert_eq!(sample.unrecoverable_frames, 2);
-        assert_eq!(sample.recovered_frames, 1);
-        assert_eq!(sample.recovered_fragments, 3);
-        assert_eq!(sample.presented_frames, 2);
-        assert_eq!(sample.render_dropped_frames, 1);
-        assert_eq!(sample.avg_decode_queue_us, 90);
-        assert_eq!(sample.avg_render_queue_us, 60);
+        assert_eq!(sample.proto.unrecoverable_frames, 2);
+        assert_eq!(sample.proto.recovered_frames, 1);
+        assert_eq!(sample.proto.recovered_fragments, 3);
+        assert_eq!(sample.proto.presented_frames, 2);
+        assert_eq!(sample.proto.render_dropped_frames, 1);
+        assert_eq!(sample.proto.avg_decode_queue_us, 90);
+        assert_eq!(sample.proto.avg_render_queue_us, 60);
 
         let next = telemetry.drain();
-        assert_eq!(next.presented_frames, 0);
-        assert_eq!(next.avg_decode_queue_us, 0);
+        assert_eq!(next.proto.presented_frames, 0);
+        assert_eq!(next.proto.avg_decode_queue_us, 0);
     }
 }

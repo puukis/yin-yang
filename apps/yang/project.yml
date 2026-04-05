@@ -1,0 +1,72 @@
+name: Yang
+options:
+  bundleIdPrefix: com.puukis
+  minimumXcodeGenVersion: "2.40.0"
+  defaultConfig: Debug
+
+settings:
+  base:
+    MACOSX_DEPLOYMENT_TARGET: "13.0"
+    SWIFT_VERSION: "5.9"
+
+targets:
+  Yang:
+    type: application
+    platform: macOS
+    deploymentTarget: "13.0"
+    sources:
+      - path: Yang
+        type: group
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.puukis.yang
+        PRODUCT_NAME: Yang
+        SWIFT_OBJC_BRIDGING_HEADER: Yang/yang-Bridging-Header.h
+        HEADER_SEARCH_PATHS: $(SRCROOT)/../../crates/yang/include
+        LIBRARY_SEARCH_PATHS: $(SRCROOT)/../../target/release
+        OTHER_LDFLAGS:
+          - "-lyang"
+          - "-framework Metal"
+          - "-framework CoreVideo"
+          - "-framework CoreMedia"
+          - "-framework VideoToolbox"
+          - "-framework CoreFoundation"
+          - "-framework QuartzCore"
+          - "-framework Security"
+          - "-framework CoreGraphics"
+          - "-framework AppKit"
+          - "-liconv"
+          - "-lc++"
+        CODE_SIGNING_REQUIRED: NO
+        CODE_SIGNING_ALLOWED: NO
+        CODE_SIGN_IDENTITY: ""
+      configs:
+        Debug:
+          ONLY_ACTIVE_ARCH: YES
+        Release:
+          ONLY_ACTIVE_ARCH: NO
+    preBuildScripts:
+      - name: Build Rust Library
+        script: |
+          set -e
+          export PATH="$HOME/.cargo/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"
+          cd "${SRCROOT}/../.."
+          cargo build --release -p yang
+        shell: /bin/bash
+        showEnvVars: false
+        outputFiles:
+          - $(SRCROOT)/../../target/release/libyang.a
+    info:
+      path: Yang/Info.plist
+      properties:
+        CFBundleName: Yang
+        CFBundleDisplayName: Yang
+        CFBundleVersion: "1"
+        CFBundleShortVersionString: "0.3.0"
+        NSPrincipalClass: NSApplication
+        LSMinimumSystemVersion: "$(MACOSX_DEPLOYMENT_TARGET)"
+        NSInputMonitoringUsageDescription: >
+          Yang needs Input Monitoring access to capture keyboard and mouse
+          input for the remote desktop session.
+        NSAppleEventsUsageDescription: >
+          Yang uses Apple Events for system integration.

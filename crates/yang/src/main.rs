@@ -1,9 +1,4 @@
-mod cursor;
-mod decode;
-mod input;
-mod render;
-mod telemetry;
-mod transport;
+use yang::{render, transport};
 
 use anyhow::{Context, Result};
 use clap::Parser;

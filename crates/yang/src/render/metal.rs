@@ -113,7 +113,10 @@ struct CursorRenderParams {
 #[cfg(target_os = "macos")]
 struct RendererState {
     device: Device,
-    layer: MetalLayer,
+    /// Owned layer — `Some` in the CLI path (Rust creates the window + layer).
+    owned_layer: Option<MetalLayer>,
+    /// Borrowed layer pointer — non-null in the FFI/Swift path (Swift owns the layer).
+    ext_layer_ptr: *mut std::ffi::c_void,
     command_queue: CommandQueue,
     pipeline_state: RenderPipelineState,
     texture_cache: CVMetalTextureCache,
@@ -383,13 +386,15 @@ fn render_loop_macos(
         let mut renderer = RendererState::new(interpolate, initial_width, initial_height)?;
         info!("macOS renderer startup: attaching CAMetalLayer");
         content_view.setWantsLayer(YES);
-        content_view.setLayer(<*mut _>::cast(renderer.layer.as_mut()));
-        sync_layer_frame(content_view, renderer.layer.as_ref());
+        content_view.setLayer(<*mut _>::cast(
+            renderer.owned_layer.as_mut().unwrap().as_mut(),
+        ));
+        sync_layer_frame(content_view, renderer.layer());
         info!("macOS renderer startup: sizing window and layer");
         resize_window_and_layer(
             window,
             content_view,
-            renderer.layer.as_ref(),
+            renderer.layer(),
             initial_width,
             initial_height,
         );
@@ -409,7 +414,7 @@ fn render_loop_macos(
 
         loop {
             pump_app_events(app);
-            sync_layer_frame(content_view, renderer.layer.as_ref());
+            sync_layer_frame(content_view, renderer.layer());
 
             if shutdown.load(Ordering::Relaxed) || window.isVisible() != YES {
                 break;
@@ -454,7 +459,7 @@ fn render_loop_macos(
                 resize_window_and_layer(
                     window,
                     content_view,
-                    renderer.layer.as_ref(),
+                    renderer.layer(),
                     frame.width,
                     frame.height,
                 );
@@ -592,7 +597,91 @@ impl RendererState {
 
         Ok(Self {
             device,
-            layer,
+            owned_layer: Some(layer),
+            ext_layer_ptr: std::ptr::null_mut(),
+            command_queue,
+            pipeline_state,
+            texture_cache,
+            null_color_texture,
+            null_mono_texture,
+            color_cursor_texture: None,
+            mono_cursor_texture: None,
+            current_cursor_generation: None,
+            interpolator,
+        })
+    }
+
+    /// Returns a reference to the active `CAMetalLayer`, whether owned or borrowed.
+    fn layer(&self) -> &MetalLayerRef {
+        if let Some(ref l) = self.owned_layer {
+            l.as_ref()
+        } else {
+            unsafe { MetalLayerRef::from_ptr(self.ext_layer_ptr as *mut _) }
+        }
+    }
+
+    /// Construct a renderer that renders into a `CAMetalLayer` owned by Swift.
+    ///
+    /// Swift creates and attaches the layer to a view; Rust configures it here
+    /// (pixel format, device, drawable count) and renders into it from a
+    /// background thread.  The caller is responsible for keeping the layer alive
+    /// until the render loop stops.
+    fn new_ffi(
+        ext_layer_ptr: *mut std::ffi::c_void,
+        interpolate: bool,
+        initial_width: u32,
+        initial_height: u32,
+    ) -> Result<Self> {
+        use cocoa::foundation::NSSize;
+
+        let device = Device::system_default().context("create Metal device")?;
+        let command_queue = device.new_command_queue();
+        let pipeline_state = build_pipeline_state(&device)?;
+        let texture_cache = CVMetalTextureCache::new(None, device.clone(), None)
+            .map_err(|status| anyhow!("create CVMetalTextureCache failed: {status}"))?;
+        let null_color_texture =
+            create_u8_texture(&device, MTLPixelFormat::RGBA8Uint, 1, 1, &[0, 0, 0, 0], 4)?;
+        let null_mono_texture = create_u8_texture(&device, MTLPixelFormat::R8Uint, 1, 1, &[0], 1)?;
+
+        // Configure the CAMetalLayer that Swift handed us.
+        unsafe {
+            let layer_ref: &MetalLayerRef = MetalLayerRef::from_ptr(ext_layer_ptr as *mut _);
+            layer_ref.set_device(&device);
+            layer_ref.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+            layer_ref.set_display_sync_enabled(true);
+            layer_ref.set_presents_with_transaction(false);
+            layer_ref.set_maximum_drawable_count(if interpolate { 3 } else { 2 });
+            layer_ref.set_opaque(true);
+            layer_ref.set_framebuffer_only(true);
+            layer_ref.remove_all_animations();
+            let _: () = msg_send![
+                ext_layer_ptr as *mut objc::runtime::Object,
+                setDrawableSize: NSSize::new(initial_width as f64, initial_height as f64)
+            ];
+        }
+
+        let interpolator = if interpolate {
+            match crate::render::interpolator::FrameInterpolator::new(
+                &device,
+                initial_width as u64,
+                initial_height as u64,
+            ) {
+                Ok(i) => Some(i),
+                Err(e) => {
+                    warn!(
+                        "GPU optical-flow interpolator init failed, interpolation disabled: {e:#}"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        Ok(Self {
+            device,
+            owned_layer: None,
+            ext_layer_ptr,
             command_queue,
             pipeline_state,
             texture_cache,
@@ -713,7 +802,7 @@ fn present_interpolated_frame(
     // "compensate for bottom-origin data", so we negate — matching present_frame.
     let flipped = !prev_y_cv.is_flipped();
 
-    let Some(drawable) = state.layer.next_drawable() else {
+    let Some(drawable) = state.layer().next_drawable() else {
         return Ok(());
     };
 
@@ -855,7 +944,7 @@ fn present_frame(
         .as_ref()
         .unwrap_or(&state.null_mono_texture);
 
-    let Some(drawable) = state.layer.next_drawable() else {
+    let Some(drawable) = state.layer().next_drawable() else {
         return Ok(());
     };
 
@@ -1103,4 +1192,176 @@ fn fullscreen_vertices(flipped: bool) -> [Vertex; 4] {
             tex_coord: [1.0, top_v],
         },
     ]
+}
+
+// ---------------------------------------------------------------------------
+// FFI render path — used by the macOS Swift GUI app
+// ---------------------------------------------------------------------------
+
+/// Render loop for the Swift GUI app.
+///
+/// Unlike [`render_loop_macos`], this function:
+/// - Runs on any thread — Swift owns the window/view; Rust only renders into
+///   the provided `CAMetalLayer`.
+/// - Does **not** create an `NSWindow`, call `pump_app_events`, or resize a
+///   window.  The Swift view handles layout.
+/// - Updates the layer's `drawableSize` when the video stream resolution changes.
+///
+/// Returns when `shutdown` is set or the `render_rx` sender drops.
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_loop_macos_ffi(
+    ext_layer_ptr: *mut std::ffi::c_void,
+    render_rx: crossbeam_channel::Receiver<crate::decode::videotoolbox::RenderFrame>,
+    initial_width: u32,
+    initial_height: u32,
+    cursor_store: std::sync::Arc<crate::cursor::RemoteCursorStore>,
+    shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    telemetry: crate::telemetry::SharedClientTelemetry,
+    interpolate: bool,
+) {
+    use core_video::pixel_buffer::kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
+    use objc::rc::autoreleasepool;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    let mut renderer =
+        match RendererState::new_ffi(ext_layer_ptr, interpolate, initial_width, initial_height) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("FFI renderer init failed: {e:#}");
+                return;
+            }
+        };
+
+    info!(
+        "FFI Metal renderer started ({}×{}, interpolate={})",
+        initial_width, initial_height, interpolate
+    );
+
+    let mut current_size = (initial_width, initial_height);
+    let mut first_frame_logged = false;
+    let mut queued_frame: Option<crate::decode::videotoolbox::RenderFrame> = None;
+    let mut render_stats = RenderStats::new();
+    let mut prev_frame: Option<crate::decode::videotoolbox::RenderFrame> = None;
+
+    loop {
+        if shutdown.load(Ordering::Relaxed) {
+            break;
+        }
+
+        let mut disconnected = false;
+        let mut dropped_frames = 0u32;
+
+        let frame = match queued_frame.take() {
+            Some(f) => f,
+            None => match render_rx.recv_timeout(Duration::from_millis(8)) {
+                Ok(f) => f,
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+            },
+        };
+
+        loop {
+            match render_rx.try_recv() {
+                Ok(f) => {
+                    if queued_frame.replace(f).is_some() {
+                        dropped_frames = dropped_frames.saturating_add(1);
+                    }
+                }
+                Err(crossbeam_channel::TryRecvError::Empty) => break,
+                Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    disconnected = true;
+                    break;
+                }
+            }
+        }
+
+        if !first_frame_logged {
+            info!(
+                "FFI Metal renderer received first frame seq={} {}×{}",
+                frame.frame_seq, frame.width, frame.height
+            );
+            first_frame_logged = true;
+        }
+
+        if current_size != (frame.width, frame.height) {
+            current_size = (frame.width, frame.height);
+            unsafe {
+                let size = cocoa::foundation::NSSize::new(frame.width as f64, frame.height as f64);
+                let _: () = msg_send![
+                    ext_layer_ptr as *mut objc::runtime::Object,
+                    setDrawableSize: size
+                ];
+            }
+            prev_frame = None;
+            if let Some(ref mut interp) = renderer.interpolator {
+                if let Err(e) =
+                    interp.resize(&renderer.device, frame.width as u64, frame.height as u64)
+                {
+                    warn!("interpolator resize failed: {e:#}");
+                }
+            }
+        }
+
+        if renderer.interpolator.is_some() {
+            if let Some(ref prev) = prev_frame {
+                if !frame.is_keyframe {
+                    let full_range = frame.pixel_buffer.get_pixel_format()
+                        == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
+                    autoreleasepool(|| {
+                        if let Err(e) = present_interpolated_frame(
+                            &mut renderer,
+                            &prev.pixel_buffer,
+                            &frame.pixel_buffer,
+                            full_range,
+                        ) {
+                            warn!(
+                                "present interpolated frame before seq={} failed: {e:#}",
+                                frame.frame_seq
+                            );
+                        }
+                    });
+                }
+            }
+        }
+
+        autoreleasepool(|| {
+            let present_started_at_us = now_local_us();
+            if let Err(e) = present_frame(&mut renderer, &frame, &cursor_store) {
+                warn!("present frame {} failed: {e:#}", frame.frame_seq);
+            } else {
+                let present_finished_at_us = now_local_us();
+                let present_cpu_us = duration_to_u32_us(std::time::Duration::from_micros(
+                    present_finished_at_us.saturating_sub(present_started_at_us),
+                ));
+                let render_queue_us =
+                    present_started_at_us.saturating_sub(frame.decoded_at_us) as u32;
+                telemetry.record_render(
+                    frame
+                        .decode_submitted_at_us
+                        .saturating_sub(frame.received_at_us) as u32,
+                    render_queue_us,
+                    dropped_frames,
+                );
+                render_stats.record_presented(
+                    &frame,
+                    render_queue_us,
+                    present_cpu_us,
+                    dropped_frames,
+                );
+            }
+        });
+        render_stats.maybe_log();
+
+        if renderer.interpolator.is_some() {
+            prev_frame = Some(frame);
+        }
+
+        if disconnected && queued_frame.is_none() {
+            break;
+        }
+    }
+
+    info!("FFI Metal renderer stopped");
 }
