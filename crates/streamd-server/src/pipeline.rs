@@ -1069,11 +1069,7 @@ const REF_FRAME_RING_SIZE: usize = 128;
 
 /// Append a (frame_seq, timestamp_us) entry to the ring, evicting the oldest
 /// entry when the ring is full.
-fn record_ref_frame_timestamp(
-    ring: &mut VecDeque<(u32, u64)>,
-    frame_seq: u32,
-    timestamp_us: u64,
-) {
+fn record_ref_frame_timestamp(ring: &mut VecDeque<(u32, u64)>, frame_seq: u32, timestamp_us: u64) {
     if ring.len() >= REF_FRAME_RING_SIZE {
         ring.pop_front();
     }

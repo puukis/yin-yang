@@ -71,8 +71,6 @@ pub struct ClientOptions {
     pub min_fps: u8,
     pub min_bitrate_bps: u32,
     pub max_bitrate_bps: u32,
-    /// Enable optical-flow frame interpolation on the client render loop.
-    pub interpolate: bool,
 }
 
 pub struct ClientSession {
@@ -213,7 +211,6 @@ async fn join_task(name: &str, task: Option<tokio::task::JoinHandle<Result<()>>>
 }
 
 pub async fn run_client(server_addr: SocketAddr, options: ClientOptions) -> Result<()> {
-    let interpolate = options.interpolate;
     let Some(mut session) = connect_client_session(server_addr, options).await? else {
         return Ok(());
     };
@@ -225,7 +222,6 @@ pub async fn run_client(server_addr: SocketAddr, options: ClientOptions) -> Resu
         session.cursor_store(),
         session.shutdown_signal(),
         session.telemetry(),
-        interpolate,
     );
     let shutdown_result = session.shutdown().await;
     render_result.and(shutdown_result)
