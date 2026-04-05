@@ -36,11 +36,8 @@ static FFI_INIT: std::sync::Once = std::sync::Once::new();
 fn ffi_init() {
     FFI_INIT.call_once(|| {
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let filter = std::env::var("RUST_LOG")
-            .unwrap_or_else(|_| "yang=debug,info".to_owned());
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .try_init();
+        let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "yang=debug,info".to_owned());
+        let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
     });
 }
 
@@ -115,16 +112,16 @@ pub type YangStatsCallback =
 // ---------------------------------------------------------------------------
 
 pub struct YangSession {
-    runtime:        tokio::runtime::Runtime,
+    runtime: tokio::runtime::Runtime,
     /// `Option` so we can `take()` for the async shutdown call.
-    session:        Option<crate::transport::control::ClientSession>,
+    session: Option<crate::transport::control::ClientSession>,
     /// Shared shutdown flag — also owned by the render loop and supervisor.
-    shutdown:       Arc<AtomicBool>,
-    render_thread:  Option<std::thread::JoinHandle<()>>,
-    stats_stop:     Arc<AtomicBool>,
-    stats_thread:   Option<std::thread::JoinHandle<()>>,
+    shutdown: Arc<AtomicBool>,
+    render_thread: Option<std::thread::JoinHandle<()>>,
+    stats_stop: Arc<AtomicBool>,
+    stats_thread: Option<std::thread::JoinHandle<()>>,
     /// Server-reported stream dimensions (pixels).
-    initial_width:  u32,
+    initial_width: u32,
     initial_height: u32,
 }
 
@@ -135,7 +132,9 @@ pub struct YangSession {
 struct SendPtr(*mut c_void);
 unsafe impl Send for SendPtr {}
 impl SendPtr {
-    fn get(self) -> *mut c_void { self.0 }
+    fn get(self) -> *mut c_void {
+        self.0
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -143,6 +142,8 @@ impl SendPtr {
 // ---------------------------------------------------------------------------
 
 /// Connect to a Yin server and start streaming into `ca_metal_layer`.
+///
+/// # Safety
 ///
 /// Blocks until the QUIC session is established (or fails).
 /// **Do not call from the macOS main thread.**
@@ -242,12 +243,12 @@ pub unsafe extern "C" fn yang_connect(
             return std::ptr::null_mut();
         }
     };
-    let initial_width  = client_session.width;
+    let initial_width = client_session.width;
     let initial_height = client_session.height;
-    let cursor_store   = client_session.cursor_store();
-    let shutdown       = client_session.shutdown_signal();
-    let telemetry      = client_session.telemetry();
-    let interpolate    = opts.interpolate;
+    let cursor_store = client_session.cursor_store();
+    let shutdown = client_session.shutdown_signal();
+    let telemetry = client_session.telemetry();
+    let interpolate = opts.interpolate;
 
     // Spawn the render thread (runs until shutdown or channel closes)
     let layer_send = SendPtr(ca_metal_layer);
@@ -271,8 +272,8 @@ pub unsafe extern "C" fn yang_connect(
     // Spawn the stats thread (optional)
     let stats_stop = Arc::new(AtomicBool::new(false));
     let stats_thread = stats_cb.map(|cb| {
-        let stop   = stats_stop.clone();
-        let telem  = client_session.telemetry();
+        let stop = stats_stop.clone();
+        let telem = client_session.telemetry();
         let ud_send = SendPtr(stats_userdata);
         std::thread::Builder::new()
             .name("yang-stats".to_owned())
@@ -297,6 +298,8 @@ pub unsafe extern "C" fn yang_connect(
 /// Signal shutdown and block until the render thread and network session stop.
 ///
 /// After this returns, call [`yang_free`] to release the session memory.
+///
+/// # Safety
 #[no_mangle]
 pub unsafe extern "C" fn yang_disconnect(ptr: *mut YangSession) {
     if ptr.is_null() {
@@ -325,6 +328,8 @@ pub unsafe extern "C" fn yang_disconnect(ptr: *mut YangSession) {
 }
 
 /// Deallocate the session.  Must be called after [`yang_disconnect`] returns.
+///
+/// # Safety
 #[no_mangle]
 pub unsafe extern "C" fn yang_free(ptr: *mut YangSession) {
     if !ptr.is_null() {
@@ -336,6 +341,8 @@ pub unsafe extern "C" fn yang_free(ptr: *mut YangSession) {
 ///
 /// Call after [`yang_connect`] succeeds; safe to call from any thread.
 /// Returns `(0, 0)` if `ptr` is null.
+///
+/// # Safety
 #[no_mangle]
 pub unsafe extern "C" fn yang_stream_size(
     ptr: *const YangSession,
@@ -348,14 +355,20 @@ pub unsafe extern "C" fn yang_stream_size(
         let s = &*ptr;
         (s.initial_width, s.initial_height)
     };
-    if !out_width.is_null()  { *out_width  = w; }
-    if !out_height.is_null() { *out_height = h; }
+    if !out_width.is_null() {
+        *out_width = w;
+    }
+    if !out_height.is_null() {
+        *out_height = h;
+    }
 }
 
 /// Query the displays available on the server synchronously.
 ///
 /// Writes up to `max_count` entries into `out`.
 /// Returns the number of displays written, or `-1` on error.
+///
+/// # Safety
 #[no_mangle]
 pub unsafe extern "C" fn yang_list_displays(
     server_addr: *const c_char,
@@ -391,14 +404,13 @@ pub unsafe extern "C" fn yang_list_displays(
         }
     };
 
-    let displays =
-        match runtime.block_on(crate::transport::control::list_displays(addr)) {
-            Ok(d) => d,
-            Err(e) => {
-                warn!("yang_list_displays: {e:#}");
-                return -1;
-            }
-        };
+    let displays = match runtime.block_on(crate::transport::control::list_displays(addr)) {
+        Ok(d) => d,
+        Err(e) => {
+            warn!("yang_list_displays: {e:#}");
+            return -1;
+        }
+    };
 
     let count = displays.len().min(max_count as usize);
     let out_slice = std::slice::from_raw_parts_mut(out, count);

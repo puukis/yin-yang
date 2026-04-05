@@ -386,7 +386,9 @@ fn render_loop_macos(
         let mut renderer = RendererState::new(interpolate, initial_width, initial_height)?;
         info!("macOS renderer startup: attaching CAMetalLayer");
         content_view.setWantsLayer(YES);
-        content_view.setLayer(<*mut _>::cast(renderer.owned_layer.as_mut().unwrap().as_mut()));
+        content_view.setLayer(<*mut _>::cast(
+            renderer.owned_layer.as_mut().unwrap().as_mut(),
+        ));
         sync_layer_frame(content_view, renderer.layer());
         info!("macOS renderer startup: sizing window and layer");
         resize_window_and_layer(
@@ -639,8 +641,7 @@ impl RendererState {
             .map_err(|status| anyhow!("create CVMetalTextureCache failed: {status}"))?;
         let null_color_texture =
             create_u8_texture(&device, MTLPixelFormat::RGBA8Uint, 1, 1, &[0, 0, 0, 0], 4)?;
-        let null_mono_texture =
-            create_u8_texture(&device, MTLPixelFormat::R8Uint, 1, 1, &[0], 1)?;
+        let null_mono_texture = create_u8_texture(&device, MTLPixelFormat::R8Uint, 1, 1, &[0], 1)?;
 
         // Configure the CAMetalLayer that Swift handed us.
         unsafe {
@@ -1208,6 +1209,7 @@ fn fullscreen_vertices(flipped: bool) -> [Vertex; 4] {
 ///
 /// Returns when `shutdown` is set or the `render_rx` sender drops.
 #[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_loop_macos_ffi(
     ext_layer_ptr: *mut std::ffi::c_void,
     render_rx: crossbeam_channel::Receiver<crate::decode::videotoolbox::RenderFrame>,
@@ -1342,7 +1344,12 @@ pub(crate) fn render_loop_macos_ffi(
                     render_queue_us,
                     dropped_frames,
                 );
-                render_stats.record_presented(&frame, render_queue_us, present_cpu_us, dropped_frames);
+                render_stats.record_presented(
+                    &frame,
+                    render_queue_us,
+                    present_cpu_us,
+                    dropped_frames,
+                );
             }
         });
         render_stats.maybe_log();
