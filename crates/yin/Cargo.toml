@@ -1,0 +1,55 @@
+[package]
+name = "yin"
+version = "0.2.0-alpha.1"
+edition = "2021"
+description = "Yin — QUIC remote desktop host with NVENC video streaming for Linux Wayland and Windows."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["quic", "remote-desktop", "nvenc", "wayland", "windows"]
+
+[package.metadata.dist]
+display-name = "Yin"
+targets = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+
+[dependencies]
+yin-yang-proto = { workspace = true }
+tokio = { workspace = true }
+quinn = { workspace = true }
+rustls = { workspace = true }
+rcgen = { workspace = true }
+bytes = { workspace = true }
+socket2 = { workspace = true }
+crossbeam-channel = { workspace = true }
+ringbuf = { workspace = true }
+bincode = { workspace = true }
+serde = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wayland-client = "0.31.14"
+wayland-protocols = { version = "0.32.3", features = ["staging", "client"] }
+nix = { version = "0.29", features = ["ioctl", "uio", "mman", "sched", "user", "fs"] }
+libloading = "0.8"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.59", features = [
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D_Fxc",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+] }
+libloading = "0.8"
+
+[build-dependencies]
+bindgen = "0.71"

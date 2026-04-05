@@ -1,15 +1,15 @@
-# streamd
+# Yin-Yang
 
-![CI](https://github.com/puukis/streamd/actions/workflows/ci.yml/badge.svg)
-![Release](https://img.shields.io/github/v/release/puukis/streamd?include_prereleases)
-![License](https://img.shields.io/github/license/puukis/streamd)
+![CI](https://github.com/puukis/yin-yang/actions/workflows/ci.yml/badge.svg)
+![Release](https://img.shields.io/github/v/release/puukis/yin-yang?include_prereleases)
+![License](https://img.shields.io/github/license/puukis/yin-yang)
 ![Host](https://img.shields.io/badge/host-Linux%20%7C%20Windows-0f766e)
 ![Client](https://img.shields.io/badge/client-macOS-4338ca)
 ![Transport](https://img.shields.io/badge/transport-QUIC%20datagrams-7c3aed)
 
 **Low-latency remote desktop over QUIC with NVENC encode, VideoToolbox decode, and zero-copy Metal presentation.**
 
-streamd is a self-hosted remote desktop stack for a focused path:
+Yin-Yang is a self-hosted remote desktop stack for a focused path:
 
 * Linux Wayland or Windows on the host
 * macOS on the client
@@ -25,7 +25,7 @@ Most remote desktop tools force at least one compromise you can feel:
 * opaque protocol decisions
 * a codebase that is hard to reason about when something goes wrong
 
-streamd is built around the opposite trade-offs:
+Yin-Yang is built around the opposite trade-offs:
 
 * **Video on QUIC datagrams** so a lost packet drops a frame, not the whole stream
 * **Hardware everywhere** with NVENC on the host and VideoToolbox + Metal on the Mac
@@ -35,7 +35,7 @@ streamd is built around the opposite trade-offs:
 
 ## Status
 
-streamd is in **alpha**: the fast path is implemented, packaged releases are automated, and CI covers the supported build surfaces. The main remaining caution is security hardening, not transport capability.
+Yin-Yang is in **alpha**: the fast path is implemented, packaged releases are automated, and CI covers the supported build surfaces. The main remaining caution is security hardening, not transport capability.
 
 | Platform | Role | Status | Release Artifacts |
 |---|---|---|---|
@@ -45,15 +45,15 @@ streamd is in **alpha**: the fast path is implemented, packaged releases are aut
 
 ## Download And Install
 
-Prebuilt archives, checksums, SBOMs, and install scripts are published on the [GitHub Releases page](https://github.com/puukis/streamd/releases).
+Prebuilt archives, checksums, SBOMs, and install scripts are published on the [GitHub Releases page](https://github.com/puukis/yin-yang/releases).
 
 The release pipeline produces:
 
-* `streamd-server-x86_64-unknown-linux-gnu.tar.xz`
-* `streamd-server-x86_64-pc-windows-msvc.zip`
-* `streamd-client-x86_64-apple-darwin.tar.xz`
-* `streamd-client-aarch64-apple-darwin.tar.xz`
-* installer scripts such as `streamd-server-installer.sh`, `streamd-server-installer.ps1`, and `streamd-client-installer.sh`
+* `yin-x86_64-unknown-linux-gnu.tar.xz`
+* `yin-x86_64-pc-windows-msvc.zip`
+* `yang-x86_64-apple-darwin.tar.xz`
+* `yang-aarch64-apple-darwin.tar.xz`
+* installer scripts such as `yin-installer.sh`, `yin-installer.ps1`, and `yang-installer.sh`
 
 The release lane is tag-driven:
 
@@ -69,20 +69,20 @@ Every `v*` tag runs the release workflow and publishes platform-specific artifac
 ### Host
 
 ```bash
-cargo build --release -p streamd-server
+cargo build --release -p yin
 ```
 
 ### Client
 
 ```bash
-cargo build --release -p streamd-client
+cargo build --release -p yang
 ```
 
 Both binaries support `--help` and `--version`:
 
 ```bash
-streamd-server --help
-streamd-client --help
+yin --help
+yang --help
 ```
 
 ## Quick Start
@@ -90,13 +90,13 @@ streamd-client --help
 ### 1. Start the host
 
 ```bash
-RUST_LOG=info cargo run --release -p streamd-server -- 0.0.0.0:9000
+RUST_LOG=info cargo run --release -p yin -- 0.0.0.0:9000
 ```
 
 ### 2. List displays from the Mac
 
 ```bash
-cargo run --release -p streamd-client -- 192.168.1.50:9000 --list-displays
+cargo run --release -p yang -- 192.168.1.50:9000 --list-displays
 ```
 
 Example output:
@@ -109,7 +109,7 @@ Example output:
 ### 3. Connect
 
 ```bash
-cargo run --release -p streamd-client -- 192.168.1.50:9000 --display 1
+cargo run --release -p yang -- 192.168.1.50:9000 --display 1
 ```
 
 Grant **Accessibility** and **Input Monitoring** permissions when macOS prompts.
@@ -161,7 +161,7 @@ All traffic runs over the client-initiated QUIC connection. For direct internet 
 Then connect with your public IP or a DDNS hostname:
 
 ```bash
-cargo run --release -p streamd-client -- myhome.example.net:9000 --display 0
+cargo run --release -p yang -- myhome.example.net:9000 --display 0
 ```
 
 ## Architecture
@@ -252,7 +252,7 @@ Current transport security is intentionally minimal:
 * there is no CA-backed trust chain
 * the project assumes you control the network boundary
 
-If you expose streamd over the internet, **restrict it at the firewall** and treat it as an alpha service until the authentication story is hardened.
+If you expose Yin-Yang over the internet, **restrict it at the firewall** and treat it as an alpha service until the authentication story is hardened.
 
 See [SECURITY.md](SECURITY.md) for reporting guidance.
 
@@ -288,8 +288,8 @@ Build the host and client from the same source tree or use binaries from the sam
 
 ## Community
 
-* Usage questions and setup help: [GitHub Discussions](https://github.com/puukis/streamd/discussions)
-* Bug reports and feature requests: [GitHub Issues](https://github.com/puukis/streamd/issues)
+* Usage questions and setup help: [GitHub Discussions](https://github.com/puukis/yin-yang/discussions)
+* Bug reports and feature requests: [GitHub Issues](https://github.com/puukis/yin-yang/issues)
 * Contribution guide: [CONTRIBUTING.md](CONTRIBUTING.md)
 * Support routing: [SUPPORT.md](SUPPORT.md)
 

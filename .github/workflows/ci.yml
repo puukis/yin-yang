@@ -55,8 +55,8 @@ jobs:
       - name: cargo check --workspace
         run: cargo check --workspace
 
-      - name: cargo test -p streamd-proto
-        run: cargo test -p streamd-proto
+      - name: cargo test -p yin-yang-proto
+        run: cargo test -p yin-yang-proto
 
   linux-host:
     name: Linux Host
@@ -73,10 +73,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: cargo clippy
-        run: cargo clippy -p streamd-server --all-targets -- -D warnings
+        run: cargo clippy -p yin --all-targets -- -D warnings
 
       - name: cargo test --lib
-        run: cargo test -p streamd-server --lib
+        run: cargo test -p yin --lib
 
   windows-host:
     name: Windows Host
@@ -93,10 +93,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: cargo clippy
-        run: cargo clippy -p streamd-server --all-targets -- -D warnings
+        run: cargo clippy -p yin --all-targets -- -D warnings
 
       - name: cargo test --lib
-        run: cargo test -p streamd-server --lib
+        run: cargo test -p yin --lib
 
   macos-client:
     name: macOS Client
@@ -113,7 +113,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: cargo clippy
-        run: cargo clippy -p streamd-client --all-targets -- -D warnings
+        run: cargo clippy -p yang --all-targets -- -D warnings
 
       - name: cargo test
-        run: cargo test -p streamd-client
+        run: cargo test -p yang

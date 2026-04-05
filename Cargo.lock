@@ -1536,75 +1536,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "streamd-client"
-version = "0.2.0-alpha.1"
-dependencies = [
- "anyhow",
- "bincode",
- "bytes",
- "clap",
- "cocoa",
- "core-foundation 0.10.1",
- "core-graphics 0.24.0",
- "core-video",
- "crossbeam-channel",
- "foreign-types 0.5.0",
- "libc",
- "metal",
- "objc",
- "quinn",
- "rcgen",
- "rdev",
- "rustls",
- "serde",
- "socket2 0.5.10",
- "streamd-proto",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "streamd-proto"
-version = "0.2.0-alpha.1"
-dependencies = [
- "bincode",
- "bitflags 2.11.0",
- "bytes",
- "serde",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "streamd-server"
-version = "0.2.0-alpha.1"
-dependencies = [
- "anyhow",
- "bincode",
- "bindgen",
- "bytes",
- "clap",
- "crossbeam-channel",
- "libloading",
- "nix",
- "quinn",
- "rcgen",
- "ringbuf",
- "rustls",
- "serde",
- "socket2 0.5.10",
- "streamd-proto",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "wayland-client",
- "wayland-protocols",
- "windows",
-]
-
-[[package]]
 name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2368,12 +2299,81 @@ dependencies = [
 ]
 
 [[package]]
+name = "yang"
+version = "0.2.0-alpha.1"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "bytes",
+ "clap",
+ "cocoa",
+ "core-foundation 0.10.1",
+ "core-graphics 0.24.0",
+ "core-video",
+ "crossbeam-channel",
+ "foreign-types 0.5.0",
+ "libc",
+ "metal",
+ "objc",
+ "quinn",
+ "rcgen",
+ "rdev",
+ "rustls",
+ "serde",
+ "socket2 0.5.10",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "yin-yang-proto",
+]
+
+[[package]]
 name = "yasna"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e17bb3549cc1321ae1296b9cdc2698e2b6cb1992adfa19a8c72e5b7a738f44cd"
 dependencies = [
  "time",
+]
+
+[[package]]
+name = "yin"
+version = "0.2.0-alpha.1"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "bindgen",
+ "bytes",
+ "clap",
+ "crossbeam-channel",
+ "libloading",
+ "nix",
+ "quinn",
+ "rcgen",
+ "ringbuf",
+ "rustls",
+ "serde",
+ "socket2 0.5.10",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "wayland-client",
+ "wayland-protocols",
+ "windows",
+ "yin-yang-proto",
+]
+
+[[package]]
+name = "yin-yang-proto"
+version = "0.2.0-alpha.1"
+dependencies = [
+ "bincode",
+ "bitflags 2.11.0",
+ "bytes",
+ "serde",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

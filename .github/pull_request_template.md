@@ -8,7 +8,7 @@ Explain the problem this PR fixes or the reason for the change.
 
 ## Scope
 
-- [ ] `streamd-proto`
+- [ ] `yin-yang-proto`
 - [ ] Linux server path
 - [ ] Windows server path
 - [ ] macOS client path
