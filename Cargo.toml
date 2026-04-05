@@ -1,15 +1,15 @@
 [workspace]
 members = [
-    "crates/streamd-proto",
-    "crates/streamd-server",
-    "crates/streamd-client",
+    "crates/yin-yang-proto",
+    "crates/yin",
+    "crates/yang",
 ]
 resolver = "2"
 
 [workspace.package]
 license = "MIT"
-repository = "https://github.com/puukis/streamd"
-homepage = "https://github.com/puukis/streamd"
+repository = "https://github.com/puukis/yin-yang"
+homepage = "https://github.com/puukis/yin-yang"
 
 [workspace.dependencies]
 tokio = { version = "1.50", features = ["full"] }
@@ -26,7 +26,7 @@ anyhow = "1.0.102"
 thiserror = "2.0.18"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-streamd-proto = { path = "crates/streamd-proto" }
+yin-yang-proto = { path = "crates/yin-yang-proto" }
 bitflags = { version = "2.9", features = ["serde"] }
 clap = { version = "4.5", features = ["derive", "env"] }
 

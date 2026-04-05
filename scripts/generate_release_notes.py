@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate a curated release-notes scaffold for streamd."""
+"""Generate a curated release-notes scaffold for Yin-Yang."""
 
 from __future__ import annotations
 
@@ -293,12 +293,12 @@ def render_release_notes(
         )
     else:
         intro = (
-            "Initial public alpha release for streamd. TODO: tighten this intro into a short, "
+            "Initial public alpha release for Yin-Yang. TODO: tighten this intro into a short, "
             "technical summary before publishing."
         )
 
     sections = [
-        f"# streamd {version}",
+        f"# Yin-Yang {version}",
         "",
         intro,
         "",

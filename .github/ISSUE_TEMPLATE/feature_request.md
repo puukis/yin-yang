@@ -22,4 +22,4 @@ Select the affected areas.
 * [ ] Server (Linux)
 * [ ] Server (Windows)
 * [ ] Client (macOS)
-* [ ] Protocol (`streamd-proto`)
+* [ ] Protocol (`yin-yang-proto`)

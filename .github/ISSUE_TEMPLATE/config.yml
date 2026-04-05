@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Questions and setup help
-    url: https://github.com/puukis/streamd/discussions
+    url: https://github.com/puukis/yin-yang/discussions
     about: Use GitHub Discussions for setup questions, troubleshooting, and general usage chat.
   - name: Security reports
-    url: https://github.com/puukis/streamd/security
+    url: https://github.com/puukis/yin-yang/security
     about: Report vulnerabilities privately through GitHub Security. Do not open a public issue.

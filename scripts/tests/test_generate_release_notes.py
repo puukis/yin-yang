@@ -7,10 +7,10 @@ from scripts.generate_release_notes import ChangeEntry, parse_repo, render_relea
 
 class ParseRepoTests(unittest.TestCase):
     def test_parses_https_remote(self) -> None:
-        self.assertEqual(parse_repo("https://github.com/puukis/streamd.git"), "puukis/streamd")
+        self.assertEqual(parse_repo("https://github.com/puukis/yin-yang.git"), "puukis/yin-yang")
 
     def test_parses_ssh_remote(self) -> None:
-        self.assertEqual(parse_repo("git@github.com:puukis/streamd.git"), "puukis/streamd")
+        self.assertEqual(parse_repo("git@github.com:puukis/yin-yang.git"), "puukis/yin-yang")
 
 
 class SectionTests(unittest.TestCase):
@@ -26,11 +26,11 @@ class RenderTests(unittest.TestCase):
         notes = render_release_notes(
             "v0.1.0-alpha.1",
             None,
-            "puukis/streamd",
+            "puukis/yin-yang",
             [],
         )
-        self.assertIn("# streamd 0.1.0-alpha.1", notes)
-        self.assertIn("Initial public alpha release for streamd.", notes)
+        self.assertIn("# Yin-Yang 0.1.0-alpha.1", notes)
+        self.assertIn("Initial public alpha release for Yin-Yang.", notes)
         self.assertIn("Full Changelog: Initial public alpha release.", notes)
         self.assertNotIn("/compare/", notes)
 
@@ -38,7 +38,7 @@ class RenderTests(unittest.TestCase):
         notes = render_release_notes(
             "v0.1.0-alpha.2",
             "v0.1.0-alpha.1",
-            "puukis/streamd",
+            "puukis/yin-yang",
             [
                 ChangeEntry(
                     ref="#42",
@@ -50,11 +50,11 @@ class RenderTests(unittest.TestCase):
                 )
             ],
         )
-        self.assertIn("# streamd 0.1.0-alpha.2", notes)
+        self.assertIn("# Yin-Yang 0.1.0-alpha.2", notes)
         self.assertIn("## New Features", notes)
         self.assertIn("- #42 feat: polish release notes @puukis", notes)
         self.assertIn(
-            "Full Changelog: [v0.1.0-alpha.1...v0.1.0-alpha.2](https://github.com/puukis/streamd/compare/v0.1.0-alpha.1...v0.1.0-alpha.2)",
+            "Full Changelog: [v0.1.0-alpha.1...v0.1.0-alpha.2](https://github.com/puukis/yin-yang/compare/v0.1.0-alpha.1...v0.1.0-alpha.2)",
             notes,
         )
 
@@ -62,7 +62,7 @@ class RenderTests(unittest.TestCase):
         notes = render_release_notes(
             "v0.1.0-alpha.2",
             "v0.1.0-alpha.1",
-            "puukis/streamd",
+            "puukis/yin-yang",
             [
                 ChangeEntry(
                     ref="#41",

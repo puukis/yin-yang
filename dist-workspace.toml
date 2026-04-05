@@ -14,7 +14,7 @@ hosting = ["github"]
 # The installers to generate for each app
 installers = ["shell", "powershell"]
 # The packages to build and publish in this workspace
-packages = ["streamd-server", "streamd-client"]
+packages = ["yin", "yang"]
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = [
     "aarch64-apple-darwin",
