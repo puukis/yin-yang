@@ -34,11 +34,11 @@ clap = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 wayland-client = "0.31.14"
 wayland-protocols = { version = "0.32.3", features = ["staging", "client"] }
-nix = { version = "0.29", features = ["ioctl", "uio", "mman", "sched", "user", "fs"] }
-libloading = "0.8"
+nix = { version = "0.31", features = ["ioctl", "uio", "mman", "sched", "user", "fs"] }
+libloading = "0.9"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.59", features = [
+windows = { version = "0.62", features = [
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Direct3D",
@@ -49,7 +49,7 @@ windows = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_System_LibraryLoader",
 ] }
-libloading = "0.8"
+libloading = "0.9"
 
 [build-dependencies]
-bindgen = "0.71"
+bindgen = "0.72"
