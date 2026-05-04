@@ -12,14 +12,14 @@ repository = "https://github.com/puukis/yin-yang"
 homepage = "https://github.com/puukis/yin-yang"
 
 [workspace.dependencies]
-tokio = { version = "1.50", features = ["full"] }
+tokio = { version = "1.52", features = ["full"] }
 quinn = "0.11.9"
 rustls = { version = "0.23", features = ["ring"] }
 rcgen = "0.14.7"
 bytes = "1.11.1"
-socket2 = { version = "0.5", features = ["all"] }
+socket2 = { version = "0.6", features = ["all"] }
 crossbeam-channel = "0.5.15"
-ringbuf = "0.4.8"
+ringbuf = "0.5.0"
 bincode = { version = "2.0.1", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
 anyhow = "1.0.102"
@@ -27,8 +27,8 @@ thiserror = "2.0.18"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 yin-yang-proto = { path = "crates/yin-yang-proto" }
-bitflags = { version = "2.9", features = ["serde"] }
-clap = { version = "4.5", features = ["derive", "env"] }
+bitflags = { version = "2.11", features = ["serde"] }
+clap = { version = "4.6", features = ["derive", "env"] }
 
 # The profile that 'dist' will build with
 [profile.dist]
